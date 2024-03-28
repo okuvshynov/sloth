@@ -188,7 +188,7 @@ class TransformerBlock(nn.Module):
         self.n_heads = args.n_heads
         self.dim = args.dim
         self.attention = Attention(args)
-        self.feed_forward = FeedForward(args=args)
+        self.feed_forward = BlackboxDisk(FeedForward(args=args), args=args)
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.args = args
@@ -289,6 +289,13 @@ class Transformer(nn.Module):
         inner.load_state_dict({'weight': loaded['output.weight']})
         model.output.save(inner)
 
+        ## load ff separately
+        for i, layer in enumerate(model.layers):
+            inner = layer.feed_forward.loaded_inner()
+            prefix = f'layers.{i}.feed_forward.'
+            ff_dict = {k[len(prefix):]: v for k, v in loaded.items() if k.startswith(prefix)}
+            inner.load_state_dict(ff_dict)
+            layer.feed_forward.save(inner)
         return model
 
 
