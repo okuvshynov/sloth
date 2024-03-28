@@ -3,7 +3,7 @@ import os
 import torch
 
 from utils import device_map, next_id, device_supports_dtype
-from mistlal7b_conf import ModelArgs
+from mistral7b_conf import ModelArgs
 
 # let's make it forward-path only for now
 class BlackboxDisk(torch.nn.Module):

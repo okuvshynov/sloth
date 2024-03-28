@@ -10,7 +10,8 @@ import sys
 import torch
 import logging
 from blackbox import BlackboxDisk
-from mistlal7b_conf import ModelArgs
+from mistral7b_conf import ModelArgs
+import os
 
 def repeat_kv(keys: torch.Tensor, values: torch.Tensor, repeats: int):
     keys = torch.repeat_interleave(keys, repeats=repeats, dim=2)
@@ -280,7 +281,8 @@ class Transformer(nn.Module):
         logging.info('creating model instance')
         model = Transformer(model_args).to(device=device, dtype=dtype)
         logging.info('loading checkpoint')
-        loaded = torch.load(folder / 'consolidated.00.pth')
+        filename = os.path.join(folder, 'consolidated.00.pth')
+        loaded = torch.load(filename, mmap=True)
         logging.info('loading state dictionary')
         model.load_state_dict(loaded, strict=False)
         
