@@ -283,12 +283,11 @@ class Transformer(nn.Module):
         loaded = torch.load(folder / 'consolidated.00.pth')
         logging.info('loading state dictionary')
         model.load_state_dict(loaded, strict=False)
+        
         # now load output weight separately
-        outputw = model.output.loaded_inner()
-        outputw.load_state_dict({'weight': loaded['output.weight']})
-        model.output.save(outputw)
-
-
+        inner = model.output.loaded_inner()
+        inner.load_state_dict({'weight': loaded['output.weight']})
+        model.output.save(inner)
 
         return model
 
