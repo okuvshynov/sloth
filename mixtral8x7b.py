@@ -230,9 +230,11 @@ class MoeLayer(nn.Module):
         results = torch.zeros_like(inputs_squashed)
         for i, expert in enumerate(self.experts):
             batch_idx, nth_expert = torch.where(selected_experts == i)
-            results[batch_idx] += weights[batch_idx, nth_expert, None] * expert(
-                inputs_squashed[batch_idx]
-            )
+            if weights[batch_idx, nth_expert, None].numel() > 0:
+                tmp = weights[batch_idx, nth_expert, None] * expert(
+                    inputs_squashed[batch_idx]
+                )
+                results[batch_idx] += tmp
         return results.view_as(inputs)
 
 
@@ -543,7 +545,7 @@ def generate(
     return res, all_logprobs_merged
 
 
-def demo(model_path: str, max_tokens: int = 30, num_pipeline_ranks=2):
+def demo(model_path: str, max_tokens: int = 128, num_pipeline_ranks=2):
     if num_pipeline_ranks > 1:
         torch.distributed.init_process_group()
         torch.cuda.set_device(torch.distributed.get_rank())
@@ -561,9 +563,14 @@ def demo(model_path: str, max_tokens: int = 30, num_pipeline_ranks=2):
 
     res, logprobs = generate(
         [
-            "This is a test",
-            "This is another great test",
-            "This is a third test, mistral AI is very good at testing. ",
+"""
+[INST] You are a helpful code assistant. Your task is to generate a valid JSON object based on the given information:
+name: John
+lastname: Smith
+address: #1 Samuel St.
+Just generate the JSON object without explanations:
+[/INST]
+"""
         ],
         transformer,
         tokenizer,
