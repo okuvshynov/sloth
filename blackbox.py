@@ -3,11 +3,10 @@ import os
 import torch
 
 from utils import device_map, next_id, device_supports_dtype
-from mistral7b_conf import ModelArgs
 
 # let's make it forward-path only for now
 class BlackboxDisk(torch.nn.Module):
-    def __init__(self, module, args: ModelArgs):
+    def __init__(self, module, args):
         super().__init__()
         self.module_id = next_id()
         self.compute_dtype = args.compute_dtype
