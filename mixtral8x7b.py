@@ -381,6 +381,8 @@ class Transformer(nn.Module):
             outs = self.output(self.norm(h))
         if self.num_pipeline_ranks > 1:
             torch.distributed.broadcast(outs, src=self.num_pipeline_ranks - 1)
+
+        logging.info('forward done.')
         return outs.float()
 
     def load_state_dict(self, state_dict, *args, **kwargs):
@@ -440,16 +442,21 @@ class Transformer(nn.Module):
             pipeline_rank = torch.distributed.get_rank()
         else:
             pipeline_rank = 0
+        logging.info(f'creating the model from {folder}')
         model = Transformer(
             model_args,
             pipeline_rank=pipeline_rank,
             num_pipeline_ranks=num_pipeline_ranks,
         ).to(device=device, dtype=dtype)
+        logging.info(f'loading (mmap) state dict')
         loaded = torch.load(str(folder / "consolidated.00.pth"), mmap=True)
+        logging.info(f'applying state dict')
         model.load_state_dict(loaded, assign=True, strict=False)
+        logging.info(f'loading MoE ff')
 
         ## load ff separately
         for i_str, layer in model.layers.items():
+            logging.info(f'loading layer.{i_str}')
             for j, expert in enumerate(layer.feed_forward.experts):
                 inner = expert.loaded_inner()
                 prefix = f'layers.{i_str}.feed_forward.experts.{j}.'
@@ -570,4 +577,5 @@ def demo(model_path: str, max_tokens: int = 30, num_pipeline_ranks=2):
 
 
 if __name__ == "__main__":
+    logging.basicConfig(format='%(asctime)s %(message)s', level=logging.INFO)
     demo(sys.argv[1], num_pipeline_ranks=1)
