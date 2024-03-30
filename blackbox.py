@@ -1,7 +1,8 @@
 import os
 import torch
 
-from utils import device_map, next_id, device_supports_dtype
+from utils import device_map, next_id
+from timers import AdditiveTimer
 
 # let's make it forward-path only for now
 class BlackboxDisk(torch.nn.Module):
@@ -25,18 +26,15 @@ class BlackboxDisk(torch.nn.Module):
         return torch.load(self.frozen_path(), map_location='cpu')
     
     def load(self, device):
-        if device_supports_dtype(device, self.frozen_dtype):
-            return torch.load(self.frozen_path(), map_location=device_map(device)).to(self.compute_dtype)
-        else:
-            res = torch.load(self.frozen_path(), map_location='cpu')
-            return res.to(self.compute_dtype).to(device_map(device))
+        return torch.load(self.frozen_path(), map_location=device_map(device)).to(self.compute_dtype)
 
     def save(self, module):
         torch.save(module.to('cpu').to(self.frozen_dtype), self.frozen_path())
     
     def forward(self, input, *args):
         device = device_map(input.device)
-        module = self.load(device)
+        with AdditiveTimer('module.load') as _:
+            module = self.load(device)
         # we offload model immediately anyway.
         # no need to have gradient here ever.
         module.eval()

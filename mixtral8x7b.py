@@ -13,6 +13,7 @@ from simple_parsing.helpers import Serializable
 from torch import nn
 import sys
 from blackbox import BlackboxDisk
+from timers import AdditiveTimer, timer_context
 
 
 @dataclass
@@ -260,9 +261,12 @@ class TransformerBlock(nn.Module):
         positions: torch.Tensor,
         mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        r = self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin, positions, mask)
+        with AdditiveTimer('attention.forward') as _:
+            r = self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin, positions, mask)
+        
         h = x + r
-        r = self.feed_forward.forward(self.ffn_norm(h))
+        with AdditiveTimer('feed_forward.forward') as _:
+            r = self.feed_forward.forward(self.ffn_norm(h))
         out = h + r
         return out
 
@@ -340,49 +344,53 @@ class Transformer(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
     ):
-        freqs_cos, freqs_sin = self.freqs_cis
-        freqs_cos = freqs_cos[positions]
-        freqs_sin = freqs_sin[positions]
+        logging.info(timer_context)
+        timer_context.clear()
+        with AdditiveTimer('transformer.forward') as _:
+            freqs_cos, freqs_sin = self.freqs_cis
+            freqs_cos = freqs_cos[positions]
+            freqs_sin = freqs_sin[positions]
 
-        (bsz, seqlen) = input_ids.shape
-        num_toks = bsz * seqlen
+            (bsz, seqlen) = input_ids.shape
+            num_toks = bsz * seqlen
 
-        if self.pipeline_rank == 0:
-            assert self.tok_embeddings is not None
-            h = self.tok_embeddings(input_ids)
-            assert h.shape == (bsz, seqlen, self.args.dim)
-            assert h.dtype == self.dtype
-        else:
-            h = torch.empty(
-                bsz, seqlen, self.args.dim, device=self.device, dtype=self.dtype
-            )
-            torch.distributed.recv(h, src=self.pipeline_rank - 1)
+            if self.pipeline_rank == 0:
+                assert self.tok_embeddings is not None
+                h = self.tok_embeddings(input_ids)
+                assert h.shape == (bsz, seqlen, self.args.dim)
+                assert h.dtype == self.dtype
+            else:
+                h = torch.empty(
+                    bsz, seqlen, self.args.dim, device=self.device, dtype=self.dtype
+                )
+                torch.distributed.recv(h, src=self.pipeline_rank - 1)
 
-        mask: Optional[torch.Tensor] = None
-        if input_ids.shape[1] > 1:
-            tensor = torch.full(
-                (seqlen, seqlen),
-                dtype=h.dtype,
-                fill_value=1,
-                device=h.device,
-            )
-            mask = torch.log(torch.tril(tensor, diagonal=0)).to(h.dtype)
+            mask: Optional[torch.Tensor] = None
+            if input_ids.shape[1] > 1:
+                tensor = torch.full(
+                    (seqlen, seqlen),
+                    dtype=h.dtype,
+                    fill_value=1,
+                    device=h.device,
+                )
+                mask = torch.log(torch.tril(tensor, diagonal=0)).to(h.dtype)
 
-        for layer in self.layers.values():
-            h = layer(h, freqs_cos, freqs_sin, positions, mask)
+            for layer in self.layers.values():
+                logging.info(f'input shape = {h.shape}')
+                h = layer(h, freqs_cos, freqs_sin, positions, mask)
 
-        if self.pipeline_rank < self.num_pipeline_ranks - 1:
-            torch.distributed.send(h, dst=self.pipeline_rank + 1)
-            outs = torch.empty(
-                *h.shape[:-1], self.vocab_size, device=h.device, dtype=h.dtype
-            )
-        else:
-            assert self.output is not None
-            assert self.norm is not None
-            outs = self.output(self.norm(h))
-        if self.num_pipeline_ranks > 1:
-            torch.distributed.broadcast(outs, src=self.num_pipeline_ranks - 1)
-        return outs.float()
+            if self.pipeline_rank < self.num_pipeline_ranks - 1:
+                torch.distributed.send(h, dst=self.pipeline_rank + 1)
+                outs = torch.empty(
+                    *h.shape[:-1], self.vocab_size, device=h.device, dtype=h.dtype
+                )
+            else:
+                assert self.output is not None
+                assert self.norm is not None
+                outs = self.output(self.norm(h))
+            if self.num_pipeline_ranks > 1:
+                torch.distributed.broadcast(outs, src=self.num_pipeline_ranks - 1)
+            return outs.float()
 
     def load_state_dict(self, state_dict, *args, **kwargs):
         state_to_load = {}
@@ -554,7 +562,7 @@ def demo(model_path: str, max_tokens: int = 1024, num_pipeline_ranks=2):
     tokenizer = Tokenizer(str(Path(model_path) / "tokenizer.model"))
     transformer = Transformer.from_folder(
         Path(model_path),
-        max_batch_size=3,
+        max_batch_size=8,
         max_seq_len=max_tokens,
         num_pipeline_ranks=num_pipeline_ranks,
     )
@@ -575,7 +583,14 @@ Machine learning models underlie most modern auto- mated retrieval systems. The 
 can you give an example of MAP computation?
 </question>
 [/INST]
-"""
+""",
+"[INST] How are you? [/INST]",
+"[INST] What's today's date [/INST]",
+"[INST] How are you? [/INST]",
+"[INST] What's today's date [/INST]",
+"[INST] How are you? [/INST]",
+"[INST] What's today's date [/INST]",
+"[INST] Who is on duty today [/INST]"
         ],
         transformer,
         tokenizer,
