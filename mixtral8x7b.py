@@ -1,6 +1,5 @@
 # modified version of one_file_ref.py by mistral-ai, Apache Licence 2.0
 
-
 import json
 import logging
 import math
@@ -383,8 +382,6 @@ class Transformer(nn.Module):
             outs = self.output(self.norm(h))
         if self.num_pipeline_ranks > 1:
             torch.distributed.broadcast(outs, src=self.num_pipeline_ranks - 1)
-
-        logging.info('forward done.')
         return outs.float()
 
     def load_state_dict(self, state_dict, *args, **kwargs):
@@ -531,6 +528,7 @@ def generate(
             logprobs[:, -1, :].gather(1, next_token[:, None]),
         )
         generated.append(next_token[:, None])
+        logging.info(f'next token: {tokenizer.decode(generated[-1].tolist())}')
         logits = model.forward(
             next_token[:, None], torch.LongTensor([cur_pos]).to(next_token)
         )
@@ -545,7 +543,7 @@ def generate(
     return res, all_logprobs_merged
 
 
-def demo(model_path: str, max_tokens: int = 128, num_pipeline_ranks=2):
+def demo(model_path: str, max_tokens: int = 1024, num_pipeline_ranks=2):
     if num_pipeline_ranks > 1:
         torch.distributed.init_process_group()
         torch.cuda.set_device(torch.distributed.get_rank())
@@ -564,11 +562,18 @@ def demo(model_path: str, max_tokens: int = 128, num_pipeline_ranks=2):
     res, logprobs = generate(
         [
 """
-[INST] You are a helpful code assistant. Your task is to generate a valid JSON object based on the given information:
-name: John
-lastname: Smith
-address: #1 Samuel St.
-Just generate the JSON object without explanations:
+[INST] You are a scientist who wrote the scientific paper. 
+Using your general knowledge, relevant selection from the paper in <selection></selection> tags and reader's question in <question></question> tags, answer that question as best as you can. 
+You shall use both user input and your general knowledge, as reader's question might be more generic.
+Feel free to use or ignore the selection if it is not relevant.
+
+<selection>
+Machine learning models underlie most modern auto- mated retrieval systems. The quality of such systems is evaluated using ranking-based measures such as area under the ROC curve (AUCROC) or, as is more appropriate in the common scenario of few relevant items, measures such as area under the precision recall curve (AUCPR, also known as average precision), mean average precision (MAP), precision at a fixed recall rate (P@R), etc. In fraud detection, for example, we would like to constrain the fraction of customers that are falsely identified as fraudsters, while maximizing the recall of true ones.
+</selection>
+
+<question>
+can you give an example of MAP computation?
+</question>
 [/INST]
 """
         ],

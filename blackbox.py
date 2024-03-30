@@ -1,5 +1,4 @@
 import os
-
 import torch
 
 from utils import device_map, next_id, device_supports_dtype
@@ -38,7 +37,6 @@ class BlackboxDisk(torch.nn.Module):
     def forward(self, input, *args):
         device = device_map(input.device)
         module = self.load(device)
-
         # we offload model immediately anyway.
         # no need to have gradient here ever.
         module.eval()
