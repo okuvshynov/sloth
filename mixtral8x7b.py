@@ -376,7 +376,6 @@ class Transformer(nn.Module):
                 mask = torch.log(torch.tril(tensor, diagonal=0)).to(h.dtype)
 
             for layer in self.layers.values():
-                logging.info(f'input shape = {h.shape}')
                 h = layer(h, freqs_cos, freqs_sin, positions, mask)
 
             if self.pipeline_rank < self.num_pipeline_ranks - 1:
@@ -550,8 +549,34 @@ def generate(
             res.append(tokenizer.decode(x[:min_prompt_len] + generated[i].tolist()))
     return res, all_logprobs_merged
 
+def gen_prompts(k):
+    base = [
+        "Explain the concept of machine learning in simple terms.",
+        "What are the benefits of renewable energy sources?",
+        "Write a short poem about the sea.",
+        "Summarize the plot of 'Pride and Prejudice'.",
+        "Provide three tips for effective time management.",
+        "Describe the process of photosynthesis.",
+        "What are the main differences between Python 2 and Python 3?",
+        "How does blockchain technology work?",
+        "Explain the significance of the Turing Test.",
+        "What are some effective strategies for learning a new language?",
+        "Briefly describe the history of the Internet.",
+        "What is the theory of relativity?",
+        "Give an example of a healthy meal plan for a day.",
+        "Explain the importance of biodiversity.",
+        "How can one improve their critical thinking skills?",
+        "Describe the impact of social media on society."
+    ]
+    
+    prompts = ["[INST] " + s + " [/INST]" for s in base]
+    n = len(prompts)
+
+    return [prompts[i % n] for i in range(k)]
 
 def demo(model_path: str, max_tokens: int = 1024, num_pipeline_ranks=2):
+    batch_size = 64
+
     if num_pipeline_ranks > 1:
         torch.distributed.init_process_group()
         torch.cuda.set_device(torch.distributed.get_rank())
@@ -562,36 +587,13 @@ def demo(model_path: str, max_tokens: int = 1024, num_pipeline_ranks=2):
     tokenizer = Tokenizer(str(Path(model_path) / "tokenizer.model"))
     transformer = Transformer.from_folder(
         Path(model_path),
-        max_batch_size=8,
+        max_batch_size=batch_size,
         max_seq_len=max_tokens,
         num_pipeline_ranks=num_pipeline_ranks,
     )
 
     res, logprobs = generate(
-        [
-"""
-[INST] You are a scientist who wrote the scientific paper. 
-Using your general knowledge, relevant selection from the paper in <selection></selection> tags and reader's question in <question></question> tags, answer that question as best as you can. 
-You shall use both user input and your general knowledge, as reader's question might be more generic.
-Feel free to use or ignore the selection if it is not relevant.
-
-<selection>
-Machine learning models underlie most modern auto- mated retrieval systems. The quality of such systems is evaluated using ranking-based measures such as area under the ROC curve (AUCROC) or, as is more appropriate in the common scenario of few relevant items, measures such as area under the precision recall curve (AUCPR, also known as average precision), mean average precision (MAP), precision at a fixed recall rate (P@R), etc. In fraud detection, for example, we would like to constrain the fraction of customers that are falsely identified as fraudsters, while maximizing the recall of true ones.
-</selection>
-
-<question>
-can you give an example of MAP computation?
-</question>
-[/INST]
-""",
-"[INST] How are you? [/INST]",
-"[INST] What's today's date [/INST]",
-"[INST] How are you? [/INST]",
-"[INST] What's today's date [/INST]",
-"[INST] How are you? [/INST]",
-"[INST] What's today's date [/INST]",
-"[INST] Who is on duty today [/INST]"
-        ],
+        gen_prompts(batch_size),
         transformer,
         tokenizer,
         max_tokens=max_tokens,
