@@ -574,8 +574,7 @@ def gen_prompts(k):
 
     return [prompts[i % n] for i in range(k)]
 
-def demo(model_path: str, max_tokens: int = 1024, num_pipeline_ranks=2):
-    batch_size = 64
+def demo(model_path: str, max_tokens: int = 1024, num_pipeline_ranks=2, batch_size=16):
 
     if num_pipeline_ranks > 1:
         torch.distributed.init_process_group()
@@ -607,4 +606,4 @@ def demo(model_path: str, max_tokens: int = 1024, num_pipeline_ranks=2):
 
 if __name__ == "__main__":
     logging.basicConfig(format='%(asctime)s %(message)s', level=logging.INFO)
-    demo(sys.argv[1], num_pipeline_ranks=1)
+    demo(sys.argv[1], num_pipeline_ranks=1, batch_size=32)
