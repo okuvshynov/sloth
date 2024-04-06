@@ -13,7 +13,8 @@ from simple_parsing.helpers import Serializable
 from torch import nn
 import sys
 from blackbox import BlackboxDisk
-from timers import AdditiveTimer, timer_context
+from timers import AdditiveTimer
+import fewlines.metrics as fm
 
 
 @dataclass
@@ -215,6 +216,7 @@ class MoeLayer(nn.Module):
         self.experts = nn.ModuleList(experts)
         self.gate = gate
         self.args = moe_args
+        self.selected_freq = [0 for i in range(len(experts))]
 
     def forward(self, inputs: torch.Tensor):
         inputs_squashed = inputs.view(-1, inputs.shape[-1])
@@ -222,6 +224,10 @@ class MoeLayer(nn.Module):
         weights, selected_experts = torch.topk(
             gate_logits, self.args.num_experts_per_tok
         )
+        for ex in selected_experts.view(-1).tolist():
+            self.selected_freq[ex] += 1
+        print(self.selected_freq)
+        
         weights = nn.functional.softmax(
             weights,
             dim=1,
@@ -344,8 +350,8 @@ class Transformer(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
     ):
-        logging.info(timer_context)
-        timer_context.clear()
+        #for l in fm.histogram('attention.forward'):
+        #    logging.info(l)
         with AdditiveTimer('transformer.forward') as _:
             freqs_cos, freqs_sin = self.freqs_cis
             freqs_cos = freqs_cos[positions]
@@ -606,4 +612,4 @@ def demo(model_path: str, max_tokens: int = 1024, num_pipeline_ranks=2, batch_si
 
 if __name__ == "__main__":
     logging.basicConfig(format='%(asctime)s %(message)s', level=logging.INFO)
-    demo(sys.argv[1], num_pipeline_ranks=1, batch_size=32)
+    demo(sys.argv[1], num_pipeline_ranks=1, batch_size=1)
