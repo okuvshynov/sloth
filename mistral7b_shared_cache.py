@@ -10,9 +10,12 @@ import torch
 import logging
 from mistral7b_conf import ModelArgs
 import os
+import time
 
 from fewlines import timer as ft
 from fewlines import dashboard as fd
+from fewlines import metrics as fm
+
 
 def repeat_kv(keys: torch.Tensor, values: torch.Tensor, repeats: int):
     keys = torch.repeat_interleave(keys, repeats=repeats, dim=2)
@@ -103,7 +106,8 @@ class Attention(nn.Module):
             args.dim,
             bias=False
         )
-        self.cache_k = torch.empty(
+        """
+                self.cache_k = torch.empty(
             (
                 args.max_batch_size,
                 args.sliding_window,
@@ -119,6 +123,8 @@ class Attention(nn.Module):
                 self.args.head_dim,
             ), dtype=torch.float16
         ).to('mps')
+        """
+
 
     def forward_all_no_cache(
             self, x: torch.Tensor, freqs_cos: torch.Tensor, freqs_sin: torch.Tensor, positions: torch.Tensor, mask: Optional[torch.Tensor]
@@ -159,58 +165,6 @@ class Attention(nn.Module):
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         output = torch.nan_to_num(output)
         
-        return self.wo(output)
-
-    def forward(
-            self, x: torch.Tensor, freqs_cos: torch.Tensor, freqs_sin: torch.Tensor, positions: torch.Tensor, mask: Optional[torch.Tensor]
-    ) -> torch.Tensor:
-        
-        bsz, seqlen, _ = x.shape
-
-        #print('attention')
-
-        #print(x.shape, freqs_cos.shape, positions.shape, mask.shape)
-        # for new shared:
-        # [3, 17, 4096], [3, 17, 64], [3, 17], [3, 17, 17]
-        # for old:
-        # [3, 5, 4096], [5, 64], [5], [5, 5]
-
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
-        xq = xq.view(bsz, seqlen, self.n_heads, self.args.head_dim)
-        xk = xk.view(bsz, seqlen, self.n_kv_heads, self.args.head_dim)
-        xv = xv.view(bsz, seqlen, self.n_kv_heads, self.args.head_dim)
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin)
-        
-        # The cache is a rotating buffer
-        scatter_pos = (positions[-self.sliding_window:] % self.sliding_window)[None, :, None, None]
-
-        scatter_pos = scatter_pos.repeat(bsz, 1, self.n_kv_heads, self.args.head_dim)
-
-        self.cache_k[:bsz].scatter_(dim=1, index=scatter_pos, src=xk[:, -self.sliding_window:])
-        self.cache_v[:bsz].scatter_(dim=1, index=scatter_pos, src=xv[:, -self.sliding_window:])
-
-
-        if positions.shape[0] > 1:
-            # prefill
-            key, value = repeat_kv(xk, xv, self.repeats)
-        else:
-            cur_pos = positions[-1].item() + 1
-            key, value = repeat_kv(self.cache_k[:bsz, :cur_pos, ...], self.cache_v[:bsz, :cur_pos, ...], self.repeats)
-
-        query = xq.transpose(1, 2)
-        key = key.transpose(1, 2)
-        value = value.transpose(1, 2)
-        # scores : [bsz, n_heads, seqlen | 1, seqlen]
-        scores = torch.matmul(query, key.transpose(2, 3)) * self.scale
-        
-        #print(scores.shape, mask.shape)
-        if mask is not None:
-            scores += mask[None, None, ...]
-
-        scores = scores.float()
-        scores = nn.functional.softmax(scores, dim=-1).type_as(query)
-        output = torch.matmul(scores, value)  # (bs, n_local_heads, slen, head_dim)
-        output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
         return self.wo(output)
 
 
@@ -266,23 +220,19 @@ class TransformerBlock(nn.Module):
     def forward(
             self, x: torch.Tensor, freqs_cos: torch.Tensor, freqs_sin: torch.Tensor, positions: torch.Tensor, mask: Optional[torch.Tensor]
     ) -> torch.Tensor:
-        with ft.Timer('attention') as _:
-            r = self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin, positions, mask)
+        r = self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin, positions, mask)
         h = x + r
 
-        with ft.Timer('feed_forward') as _:
-            r = self.feed_forward.forward(self.ffn_norm(h))
+        r = self.feed_forward.forward(self.ffn_norm(h))
         out = h + r
         return out
     
     def forward_all(
             self, x: torch.Tensor, freqs_cos: torch.Tensor, freqs_sin: torch.Tensor, positions: torch.Tensor, mask: Optional[torch.Tensor]
     ) -> torch.Tensor:
-        with ft.Timer('attention') as _:
-            r = self.attention.forward_all_no_cache(self.attention_norm(x), freqs_cos, freqs_sin, positions, mask)
+        r = self.attention.forward_all_no_cache(self.attention_norm(x), freqs_cos, freqs_sin, positions, mask)
         h = x + r
-        with ft.Timer('feed_forward') as _:
-            r = self.feed_forward.forward(self.ffn_norm(h))
+        r = self.feed_forward.forward(self.ffn_norm(h))
         out = h + r
         return out
 
@@ -395,7 +345,7 @@ class Transformer(nn.Module):
 
         res = self.output(self.norm(h))
 
-        logging.info(f'evaluated model, got {res.shape} of {res.dtype}')
+        #logging.info(f'evaluated model, got {res.shape} of {res.dtype}')
 
         return res.float()
 
@@ -411,7 +361,6 @@ class Transformer(nn.Module):
         loaded = torch.load(filename, mmap=True)
         logging.info('loading state dictionary')
         model.load_state_dict(loaded, strict=False)
-
 
         return model
 
@@ -436,15 +385,6 @@ class Tokenizer:
     def decode(self, t: List[int]) -> str:
         return self._model.decode(t)
 
-def one_step(input_tokens, input_mask, model, min_prompt_len):
-    positions = torch.arange(0, min_prompt_len).to("mps")
-    all_positions = torch.arange(0, input_tokens.shape[1]).repeat(input_tokens.shape[0], 1).to('mps')
-    all_positions = all_positions * input_mask
-    logits = model.forward(input_tokens[:, :min_prompt_len], positions)
-    logprobs = nn.functional.log_softmax(logits, dim=-1)
-    next_token = torch.argmax(logprobs[:, -1,:], dim=-1)
-    print(next_token)
-
 def one_step_all(input_tokens, input_mask, model, prompt_lens):
     all_positions = torch.arange(0, input_tokens.shape[1]).repeat(input_tokens.shape[0], 1).to('mps')
     all_positions = all_positions * input_mask
@@ -455,7 +395,7 @@ def one_step_all(input_tokens, input_mask, model, prompt_lens):
     return next_tokens
 
 @torch.no_grad()
-def generate(prompts: List[str], model: Transformer, tokenizer: Tokenizer, max_tokens: int):
+def single_shared(prompts: List[str], model: Transformer, tokenizer: Tokenizer):
     encoded_prompts = [tokenizer.encode(prompt) for prompt in prompts]
     prompt_lens = [len(x) for x in encoded_prompts]
     min_prompt_len = min(prompt_lens)
@@ -468,72 +408,33 @@ def generate(prompts: List[str], model: Transformer, tokenizer: Tokenizer, max_t
 
     #one_step(input_tokens, input_mask, model, min_prompt_len)
     next_tokens = one_step_all(input_tokens, input_mask, model, prompt_lens)
-    print(next_tokens)
+    #print(next_tokens)
     for i, x in enumerate(encoded_prompts):
-        print(tokenizer.decode(x + [next_tokens[i].item()]))
+        logging.info(tokenizer.decode(x + [next_tokens[i].item()]))
 
-    exit(0)
-
-    # pre-fill
-    positions = torch.arange(0, min_prompt_len).to("mps")
-    logits = model.forward(input_tokens[:, :min_prompt_len], positions)
-    logprobs = nn.functional.log_softmax(logits, dim=-1)
-
-    # decode
-    generated = []
-    all_logprobs = [
-        logprobs[:,:-1,:].gather(2, input_tokens[:,1:min_prompt_len,None]).squeeze(-1),
-    ]
-    cur_pos = min_prompt_len
-    for _ in range(max_tokens):
-        with ft.Timer('one_token') as _:
-            next_token = torch.argmax(logprobs[:, -1,:], dim=-1)
-            if cur_pos < input_mask.shape[1]:
-                next_token = torch.where(input_mask[:, cur_pos], input_tokens[:, cur_pos], next_token)
-            all_logprobs.append(
-                logprobs[:,-1,:].gather(1, next_token[:, None]),
-            )
-            generated.append(next_token[:, None])
-            #print(generated)
-            #print(next_token.shape)
-            positions = torch.LongTensor([cur_pos]).to(next_token)
-            #print(positions)
-
-            logits = model.forward(next_token[:, None], positions)
-            logprobs = nn.functional.log_softmax(logits, dim=-1)
-            cur_pos += 1
-
-    all_logprobs = torch.cat(all_logprobs, 1)
-    res = []
-    if max_tokens > 0:
-        generated = torch.cat(generated, 1)
-
-        for i, x in enumerate(encoded_prompts):
-            res.append(tokenizer.decode(x[:min_prompt_len] + generated[i].tolist()))
-    return res, all_logprobs
-
-
-def demo(model_path: str, max_tokens: int = 5):
+def demo(model_path: str):
+    bsz = 32
     tokenizer = Tokenizer(str(Path(model_path) / "tokenizer.model"))
-    transformer = Transformer.from_folder(Path(model_path), max_batch_size=3)
+    transformer = Transformer.from_folder(Path(model_path), max_batch_size=bsz)
 
-    res, _logprobs = generate(
-        [
-            "A B C D",
-            "A B C D E",
-            "A B C D E F",
-        ],
-        transformer,
-        tokenizer,
-        max_tokens=max_tokens,
-    )
-    for l in fd.histograms('*', color='green'):
-        logging.info(l)
-    for x in res:
-        logging.info(x)
-        logging.info("=====================")
+    prompts = [
+        "A B C",
+        "B C D",
+        "A B C D",
+        "B C D E",
+        "C D E F G",
+        "D E F G H",
+    ]
 
-    
+    for i in range(1000):
+        k = i % 32 + 1
+        p = [prompts[i % len(prompts)] for i in range(k)]
+
+        start = time.monotonic_ns()
+        single_shared(p, transformer, tokenizer)
+        dur_ms = (time.monotonic_ns() - start) * 1e-6 / k
+
+        logging.info(f'{k} - {dur_ms}ms per prompt')
 
 if __name__ == "__main__":
     logging.basicConfig(format='%(asctime)s %(message)s', level=logging.INFO)
