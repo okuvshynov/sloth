@@ -16,6 +16,8 @@ from fewlines import timer as ft
 from fewlines import dashboard as fd
 from fewlines import metrics as fm
 
+import mistral7b_base
+
 
 def repeat_kv(keys: torch.Tensor, values: torch.Tensor, repeats: int):
     keys = torch.repeat_interleave(keys, repeats=repeats, dim=2)
@@ -245,7 +247,7 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     return freqs_cos, freqs_sin
 
 
-class Transformer(nn.Module):
+class TransformerShared(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.args = args
@@ -355,7 +357,7 @@ class Transformer(nn.Module):
             model_args = ModelArgs(**json.loads(f.read()))
         model_args.max_batch_size = max_batch_size
         logging.info('creating model instance')
-        model = Transformer(model_args).to(device=device, dtype=dtype)
+        model = TransformerShared(model_args).to(device=device, dtype=dtype)
         logging.info('loading checkpoint')
         filename = os.path.join(folder, 'consolidated.00.pth')
         loaded = torch.load(filename, mmap=True)
@@ -395,7 +397,7 @@ def one_step_all(input_tokens, input_mask, model, prompt_lens):
     return next_tokens
 
 @torch.no_grad()
-def single_shared(prompts: List[str], model: Transformer, tokenizer: Tokenizer):
+def single_shared(prompts: List[str], model: TransformerShared, tokenizer: Tokenizer):
     encoded_prompts = [tokenizer.encode(prompt) for prompt in prompts]
     prompt_lens = [len(x) for x in encoded_prompts]
     min_prompt_len = min(prompt_lens)
@@ -409,13 +411,17 @@ def single_shared(prompts: List[str], model: Transformer, tokenizer: Tokenizer):
     #one_step(input_tokens, input_mask, model, min_prompt_len)
     next_tokens = one_step_all(input_tokens, input_mask, model, prompt_lens)
     #print(next_tokens)
+    res = []
     for i, x in enumerate(encoded_prompts):
-        logging.info(tokenizer.decode(x + [next_tokens[i].item()]))
+        v = tokenizer.decode(x + [next_tokens[i].item()])
+        logging.info(v)
+        res.append(v)
+    return res
 
 def demo(model_path: str):
     bsz = 32
     tokenizer = Tokenizer(str(Path(model_path) / "tokenizer.model"))
-    transformer = Transformer.from_folder(Path(model_path), max_batch_size=bsz)
+    transformer = TransformerShared.from_folder(Path(model_path), max_batch_size=bsz)
 
     prompts = [
         "A B C",
@@ -436,6 +442,61 @@ def demo(model_path: str):
 
         logging.info(f'{k} - {dur_ms}ms per prompt')
 
+def baseline(prompts, model_path):
+    tokenizer = Tokenizer(str(Path(model_path) / "tokenizer.model"))
+    transformer_base = mistral7b_base.Transformer.from_folder(Path(model_path), max_batch_size=1)
+    res = []
+    for p in prompts:
+        s, _ = mistral7b_base.generate([p], transformer_base, tokenizer, max_tokens=1)
+        res.extend(s)
+    return res
+
+def single_batch(prompts, model_path):
+    tokenizer = Tokenizer(str(Path(model_path) / "tokenizer.model"))
+    transformer = TransformerShared.from_folder(Path(model_path), max_batch_size=len(prompts))
+    return single_shared(prompts, transformer, tokenizer)
+
+def run_test(model_path: str):
+    prompts = [
+        "A",
+        "A B",
+        "A B C",
+        "B C D",
+        "A B C D",
+        "B C D E",
+        "C D E F G",
+        "D E F G H",
+        "Explain the theory of relativity in simple te",
+        "Write a short story about a robot learning to",
+        "Summarize the main plot of 'Pride and",
+        "What are the differences between Python 2 and",
+        "Describe the process of phot",
+        "How does a blockchain wor",
+        "List the steps to make a chocolate ca",
+        "Translate 'Hello, how are you?' into Fre",
+        "What is the capital of Canad",
+        "Generate a poem about the se",
+        "Explain the concept of machine le",
+        "What are the main causes of climate",
+        "Describe how to perform CP",
+        "Write a dialogue between a teacher and a student who didn't do their homew",
+        "What is quantum comput",
+        "Explain the rules of che",
+        "Summarize the key points of World Wa",
+        "What is the significance of the Turi",
+        "How does the human immune system wor",
+        "Write an essay on the importan"
+    ]
+
+    v0 = baseline(prompts, model_path)
+    v1 = single_batch(prompts, model_path)
+
+    print(v0)
+    print(v1)
+
+    print(v0 == v1)
+
 if __name__ == "__main__":
     logging.basicConfig(format='%(asctime)s %(message)s', level=logging.INFO)
-    demo(sys.argv[1])
+
+    run_test(sys.argv[1])
