@@ -37,19 +37,9 @@ def apply_rotary_emb(
     freqs_cos: torch.Tensor,
     freqs_sin: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    
-    #print(xq.shape, xk.shape, freqs_cos.shape, freqs_sin.shape)
-    # torch.Size([3, 5, 32, 128]) torch.Size([3, 5, 8, 128]) torch.Size([5, 64]) torch.Size([5, 64])
-    # torch.Size([3, 7, 32, 128]) torch.Size([3, 7, 8, 128]) torch.Size([3, 7, 64]) torch.Size([3, 7, 64])
-
     # reshape xq and xk to match the complex representation
     xq_r, xq_i = xq.float().reshape(xq.shape[:-1] + (-1, 2)).unbind(-1)
     xk_r, xk_i = xk.float().reshape(xk.shape[:-1] + (-1, 2)).unbind(-1)
-
-    #print(xq_r.shape, xq_i.shape, xk_r.shape, xk_i.shape)
-    # torch.Size([3, 5, 32, 64]) torch.Size([3, 5, 32, 64]) torch.Size([3, 5, 8, 64]) torch.Size([3, 5, 8, 64])
-    # torch.Size([3, 7, 32, 64]) torch.Size([3, 7, 32, 64]) torch.Size([3, 7, 8, 64]) torch.Size([3, 7, 8, 64])
-
 
     if freqs_cos.dim() == 2:
         freqs_cos = reshape_for_broadcast(freqs_cos, xq_r)
@@ -57,9 +47,6 @@ def apply_rotary_emb(
     elif freqs_cos.dim() == 3:
         freqs_cos = freqs_cos.unsqueeze(2)
         freqs_sin = freqs_sin.unsqueeze(2)
-
-    #print(freqs_cos.shape, freqs_sin.shape)
-    # torch.Size([5, 64]) -> torch.Size([1, 5, 1, 64])
 
     # apply rotation using real numbers
     xq_out_r = xq_r * freqs_cos - xq_i * freqs_sin
@@ -78,7 +65,6 @@ class Attention(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.args = args
-        self.dbg = False
 
         self.n_heads: int = args.n_heads
         self.n_kv_heads: int = args.n_kv_heads
@@ -134,14 +120,6 @@ class Attention(nn.Module):
         
         bsz, seqlen, _ = x.shape
 
-        #print('attention')
-
-        #print(x.shape, freqs_cos.shape, positions.shape, mask.shape)
-        # for new shared:
-        # [3, 17, 4096], [3, 17, 64], [3, 17], [3, 17, 17]
-        # for old:
-        # [3, 5, 4096], [5, 64], [5], [5, 5]
-
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
         xq = xq.view(bsz, seqlen, self.n_heads, self.args.head_dim)
         xk = xk.view(bsz, seqlen, self.n_kv_heads, self.args.head_dim)
@@ -156,7 +134,6 @@ class Attention(nn.Module):
         # scores : [bsz, n_heads, seqlen | 1, seqlen]
         scores = torch.matmul(query, key.transpose(2, 3)) * self.scale
         
-        #print(scores.shape, mask.shape)
         if mask is not None:
             scores += mask[:, None, :, :]
         
@@ -218,16 +195,6 @@ class TransformerBlock(nn.Module):
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
         self.args = args
-
-    def forward(
-            self, x: torch.Tensor, freqs_cos: torch.Tensor, freqs_sin: torch.Tensor, positions: torch.Tensor, mask: Optional[torch.Tensor]
-    ) -> torch.Tensor:
-        r = self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin, positions, mask)
-        h = x + r
-
-        r = self.feed_forward.forward(self.ffn_norm(h))
-        out = h + r
-        return out
     
     def forward_all(
             self, x: torch.Tensor, freqs_cos: torch.Tensor, freqs_sin: torch.Tensor, positions: torch.Tensor, mask: Optional[torch.Tensor]
@@ -260,8 +227,6 @@ class TransformerShared(nn.Module):
         self.layers = torch.nn.ModuleList(
             [TransformerBlock(args=args) for _ in range(args.n_layers)]
         )
-
-        #self.layers[0].attention.dbg = True
 
         self.norm = RMSNorm(args.dim, eps=args.norm_eps)
 
@@ -315,7 +280,6 @@ class TransformerShared(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        input_mask: torch.Tensor,
         prompt_lens
     ):
         h = self.tok_embeddings(input_ids)
@@ -390,7 +354,7 @@ class Tokenizer:
 def one_step_all(input_tokens, input_mask, model, prompt_lens):
     all_positions = torch.arange(0, input_tokens.shape[1]).repeat(input_tokens.shape[0], 1).to('mps')
     all_positions = all_positions * input_mask
-    logits = model.forward_all(input_tokens, all_positions, input_mask, prompt_lens)
+    logits = model.forward_all(input_tokens, all_positions, prompt_lens)
     #print(logits)
     logprobs = nn.functional.log_softmax(logits, dim=-1)
     next_tokens = [torch.argmax(logprobs[i, l - 1,:], dim=-1) for i, l in enumerate(prompt_lens)]
@@ -400,7 +364,6 @@ def one_step_all(input_tokens, input_mask, model, prompt_lens):
 def single_shared(prompts: List[str], model: TransformerShared, tokenizer: Tokenizer):
     encoded_prompts = [tokenizer.encode(prompt) for prompt in prompts]
     prompt_lens = [len(x) for x in encoded_prompts]
-    min_prompt_len = min(prompt_lens)
     max_prompt_len = max(prompt_lens)
 
     input_tokens = torch.full((len(prompts), max_prompt_len), tokenizer.pad_id, dtype=torch.long, device="mps")
@@ -408,9 +371,7 @@ def single_shared(prompts: List[str], model: TransformerShared, tokenizer: Token
         input_tokens[i, :len(encoded)] = torch.tensor(encoded).to(input_tokens)
     input_mask = input_tokens != tokenizer.pad_id
 
-    #one_step(input_tokens, input_mask, model, min_prompt_len)
     next_tokens = one_step_all(input_tokens, input_mask, model, prompt_lens)
-    #print(next_tokens)
     res = []
     for i, x in enumerate(encoded_prompts):
         v = tokenizer.decode(x + [next_tokens[i].item()])
@@ -489,9 +450,9 @@ def run_test(model_path: str):
     ]
 
     v0 = baseline(prompts, model_path)
-    v1 = single_batch(prompts, model_path)
-
     print(v0)
+
+    v1 = single_batch(prompts, model_path)
     print(v1)
 
     print(v0 == v1)
