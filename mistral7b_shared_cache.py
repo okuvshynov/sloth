@@ -32,14 +32,29 @@ def apply_rotary_emb(
     freqs_cos: torch.Tensor,
     freqs_sin: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    
+    #print(xq.shape, xk.shape, freqs_cos.shape, freqs_sin.shape)
+    # torch.Size([3, 5, 32, 128]) torch.Size([3, 5, 8, 128]) torch.Size([5, 64]) torch.Size([5, 64])
+    # torch.Size([3, 7, 32, 128]) torch.Size([3, 7, 8, 128]) torch.Size([3, 7, 64]) torch.Size([3, 7, 64])
 
     # reshape xq and xk to match the complex representation
     xq_r, xq_i = xq.float().reshape(xq.shape[:-1] + (-1, 2)).unbind(-1)
     xk_r, xk_i = xk.float().reshape(xk.shape[:-1] + (-1, 2)).unbind(-1)
 
-    # reshape freqs_cos and freqs_sin for broadcasting
-    freqs_cos = reshape_for_broadcast(freqs_cos, xq_r)
-    freqs_sin = reshape_for_broadcast(freqs_sin, xq_r)
+    #print(xq_r.shape, xq_i.shape, xk_r.shape, xk_i.shape)
+    # torch.Size([3, 5, 32, 64]) torch.Size([3, 5, 32, 64]) torch.Size([3, 5, 8, 64]) torch.Size([3, 5, 8, 64])
+    # torch.Size([3, 7, 32, 64]) torch.Size([3, 7, 32, 64]) torch.Size([3, 7, 8, 64]) torch.Size([3, 7, 8, 64])
+
+
+    if freqs_cos.dim() == 2:
+        freqs_cos = reshape_for_broadcast(freqs_cos, xq_r)
+        freqs_sin = reshape_for_broadcast(freqs_sin, xq_r)
+    elif freqs_cos.dim() == 3:
+        freqs_cos = freqs_cos.unsqueeze(2)
+        freqs_sin = freqs_sin.unsqueeze(2)
+
+    #print(freqs_cos.shape, freqs_sin.shape)
+    # torch.Size([5, 64]) -> torch.Size([1, 5, 1, 64])
 
     # apply rotation using real numbers
     xq_out_r = xq_r * freqs_cos - xq_i * freqs_sin
@@ -105,14 +120,19 @@ class Attention(nn.Module):
             ), dtype=torch.float16
         ).to('mps')
 
-    def forward(
+    def forward_all_no_cache(
             self, x: torch.Tensor, freqs_cos: torch.Tensor, freqs_sin: torch.Tensor, positions: torch.Tensor, mask: Optional[torch.Tensor]
     ) -> torch.Tensor:
         
         bsz, seqlen, _ = x.shape
 
-        if self.dbg:
-            print(x.shape)
+        #print('attention')
+
+        #print(x.shape, freqs_cos.shape, positions.shape, mask.shape)
+        # for new shared:
+        # [3, 17, 4096], [3, 17, 64], [3, 17], [3, 17, 17]
+        # for old:
+        # [3, 5, 4096], [5, 64], [5], [5, 5]
 
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
         xq = xq.view(bsz, seqlen, self.n_heads, self.args.head_dim)
@@ -120,18 +140,52 @@ class Attention(nn.Module):
         xv = xv.view(bsz, seqlen, self.n_kv_heads, self.args.head_dim)
         xq, xk = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin)
 
-        if self.dbg:
-            print(positions)
+        key, value = repeat_kv(xk, xv, self.repeats)
+
+        query = xq.transpose(1, 2)
+        key = key.transpose(1, 2)
+        value = value.transpose(1, 2)
+        # scores : [bsz, n_heads, seqlen | 1, seqlen]
+        scores = torch.matmul(query, key.transpose(2, 3)) * self.scale
+        
+        #print(scores.shape, mask.shape)
+        if mask is not None:
+            scores += mask[:, None, :, :]
+        
+        scores = scores.float()
+        scores = nn.functional.softmax(scores, dim=-1).type_as(query)
+        
+        output = torch.matmul(scores, value)  # (bs, n_local_heads, slen, head_dim)
+        output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+        output = torch.nan_to_num(output)
+        
+        return self.wo(output)
+
+    def forward(
+            self, x: torch.Tensor, freqs_cos: torch.Tensor, freqs_sin: torch.Tensor, positions: torch.Tensor, mask: Optional[torch.Tensor]
+    ) -> torch.Tensor:
+        
+        bsz, seqlen, _ = x.shape
+
+        #print('attention')
+
+        #print(x.shape, freqs_cos.shape, positions.shape, mask.shape)
+        # for new shared:
+        # [3, 17, 4096], [3, 17, 64], [3, 17], [3, 17, 17]
+        # for old:
+        # [3, 5, 4096], [5, 64], [5], [5, 5]
+
+        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+        xq = xq.view(bsz, seqlen, self.n_heads, self.args.head_dim)
+        xk = xk.view(bsz, seqlen, self.n_kv_heads, self.args.head_dim)
+        xv = xv.view(bsz, seqlen, self.n_kv_heads, self.args.head_dim)
+        xq, xk = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin)
         
         # The cache is a rotating buffer
         scatter_pos = (positions[-self.sliding_window:] % self.sliding_window)[None, :, None, None]
-        if self.dbg:
-            print(scatter_pos)
 
         scatter_pos = scatter_pos.repeat(bsz, 1, self.n_kv_heads, self.args.head_dim)
 
-        if self.dbg:
-            print(scatter_pos)
         self.cache_k[:bsz].scatter_(dim=1, index=scatter_pos, src=xk[:, -self.sliding_window:])
         self.cache_v[:bsz].scatter_(dim=1, index=scatter_pos, src=xv[:, -self.sliding_window:])
 
@@ -142,13 +196,14 @@ class Attention(nn.Module):
         else:
             cur_pos = positions[-1].item() + 1
             key, value = repeat_kv(self.cache_k[:bsz, :cur_pos, ...], self.cache_v[:bsz, :cur_pos, ...], self.repeats)
-            
+
         query = xq.transpose(1, 2)
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
         # scores : [bsz, n_heads, seqlen | 1, seqlen]
         scores = torch.matmul(query, key.transpose(2, 3)) * self.scale
         
+        #print(scores.shape, mask.shape)
         if mask is not None:
             scores += mask[None, None, ...]
 
@@ -214,6 +269,18 @@ class TransformerBlock(nn.Module):
         with ft.Timer('attention') as _:
             r = self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin, positions, mask)
         h = x + r
+
+        with ft.Timer('feed_forward') as _:
+            r = self.feed_forward.forward(self.ffn_norm(h))
+        out = h + r
+        return out
+    
+    def forward_all(
+            self, x: torch.Tensor, freqs_cos: torch.Tensor, freqs_sin: torch.Tensor, positions: torch.Tensor, mask: Optional[torch.Tensor]
+    ) -> torch.Tensor:
+        with ft.Timer('attention') as _:
+            r = self.attention.forward_all_no_cache(self.attention_norm(x), freqs_cos, freqs_sin, positions, mask)
+        h = x + r
         with ft.Timer('feed_forward') as _:
             r = self.feed_forward.forward(self.ffn_norm(h))
         out = h + r
@@ -264,10 +331,10 @@ class Transformer(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
     ):
-        h = self.tok_embeddings(input_ids)
+        h = self.tok_embeddings(input_ids) 
         freqs_cos = self.freqs_cos[positions]
         freqs_sin = self.freqs_sin[positions]
-
+        
         mask: Optional[torch.Tensor] = None
         if input_ids.shape[1] > 1:
             seqlen = input_ids.shape[1]
@@ -284,6 +351,47 @@ class Transformer(nn.Module):
         
         for layer in self.layers:
             h = layer(h, freqs_cos, freqs_sin, positions, mask)
+            exit(0)
+
+        res = self.output(self.norm(h))
+
+        logging.info(f'evaluated model, got {res.shape} of {res.dtype}')
+
+        return res.float()
+    
+    def forward_all(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        input_mask: torch.Tensor,
+        prompt_lens
+    ):
+        h = self.tok_embeddings(input_ids)
+        freqs_cos = self.freqs_cos[positions]
+        freqs_sin = self.freqs_sin[positions]
+
+        # we'll need to create separate masks
+        mask: Optional[torch.Tensor] = None
+        if input_ids.shape[1] > 1:
+            bsz, n = input_ids.shape
+
+            mask = torch.full((bsz, n, n), fill_value=0.0, dtype=input_ids.dtype, device=input_ids.device)
+
+            # Fill in the triangular part of each mask according to the actual lengths
+            for i in range(bsz):
+                length = prompt_lens[i]
+                # Create a 2D mask for the current sequence up to its actual length
+                tmp_mask = torch.tril(torch.ones((length, length), dtype=input_ids.dtype, device=input_ids.device), diagonal=0)
+                tmp_mask = torch.triu(tmp_mask, diagonal=-self.args.sliding_window)
+                # Apply the actual length mask
+                mask[i, :length, :length] = tmp_mask[:length, :length]
+
+            # Optionally, apply log to the mask if needed
+            mask = torch.log(mask)
+            #print(mask)
+
+        for layer in self.layers:
+            h = layer.forward_all(h, freqs_cos, freqs_sin, positions, mask)
 
         res = self.output(self.norm(h))
 
@@ -328,6 +436,23 @@ class Tokenizer:
     def decode(self, t: List[int]) -> str:
         return self._model.decode(t)
 
+def one_step(input_tokens, input_mask, model, min_prompt_len):
+    positions = torch.arange(0, min_prompt_len).to("mps")
+    all_positions = torch.arange(0, input_tokens.shape[1]).repeat(input_tokens.shape[0], 1).to('mps')
+    all_positions = all_positions * input_mask
+    logits = model.forward(input_tokens[:, :min_prompt_len], positions)
+    logprobs = nn.functional.log_softmax(logits, dim=-1)
+    next_token = torch.argmax(logprobs[:, -1,:], dim=-1)
+    print(next_token)
+
+def one_step_all(input_tokens, input_mask, model, prompt_lens):
+    all_positions = torch.arange(0, input_tokens.shape[1]).repeat(input_tokens.shape[0], 1).to('mps')
+    all_positions = all_positions * input_mask
+    logits = model.forward_all(input_tokens, all_positions, input_mask, prompt_lens)
+    #print(logits)
+    logprobs = nn.functional.log_softmax(logits, dim=-1)
+    next_tokens = [torch.argmax(logprobs[i, l - 1,:], dim=-1) for i, l in enumerate(prompt_lens)]
+    return next_tokens
 
 @torch.no_grad()
 def generate(prompts: List[str], model: Transformer, tokenizer: Tokenizer, max_tokens: int):
@@ -340,6 +465,14 @@ def generate(prompts: List[str], model: Transformer, tokenizer: Tokenizer, max_t
     for i, encoded in enumerate(encoded_prompts):
         input_tokens[i, :len(encoded)] = torch.tensor(encoded).to(input_tokens)
     input_mask = input_tokens != tokenizer.pad_id
+
+    #one_step(input_tokens, input_mask, model, min_prompt_len)
+    next_tokens = one_step_all(input_tokens, input_mask, model, prompt_lens)
+    print(next_tokens)
+    for i, x in enumerate(encoded_prompts):
+        print(tokenizer.decode(x + [next_tokens[i].item()]))
+
+    exit(0)
 
     # pre-fill
     positions = torch.arange(0, min_prompt_len).to("mps")
@@ -361,10 +494,10 @@ def generate(prompts: List[str], model: Transformer, tokenizer: Tokenizer, max_t
                 logprobs[:,-1,:].gather(1, next_token[:, None]),
             )
             generated.append(next_token[:, None])
-            print(generated)
-            print(next_token.shape)
+            #print(generated)
+            #print(next_token.shape)
             positions = torch.LongTensor([cur_pos]).to(next_token)
-            print(positions)
+            #print(positions)
 
             logits = model.forward(next_token[:, None], positions)
             logprobs = nn.functional.log_softmax(logits, dim=-1)
@@ -380,15 +513,15 @@ def generate(prompts: List[str], model: Transformer, tokenizer: Tokenizer, max_t
     return res, all_logprobs
 
 
-def demo(model_path: str, max_tokens: int = 35):
+def demo(model_path: str, max_tokens: int = 5):
     tokenizer = Tokenizer(str(Path(model_path) / "tokenizer.model"))
     transformer = Transformer.from_folder(Path(model_path), max_batch_size=3)
 
     res, _logprobs = generate(
         [
-            #"This is a test",
-            #"This is another test",
-            "This is a third test, mistral AI is very good at testing. ",
+            "A B C D",
+            "A B C D E",
+            "A B C D E F",
         ],
         transformer,
         tokenizer,
