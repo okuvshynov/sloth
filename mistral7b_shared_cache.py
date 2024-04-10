@@ -236,7 +236,7 @@ class TransformerShared(nn.Module):
         freqs_cos = self.freqs_cos[positions]
         freqs_sin = self.freqs_sin[positions]
 
-        print(freqs_cos)
+        #print(freqs_cos)
         #print(freqs_sin)
 
         mask: Optional[torch.Tensor] = None
@@ -332,14 +332,11 @@ def gen_single_token(prompts: List[str], model: TransformerShared, tokenizer: To
         res.append(v)
     return res
 
+# suffixes here are full paths from root to leaf
 def pick_next_suffix(prefix, suffixes, model_path):
     tokenizer = Tokenizer(str(Path(model_path) / "tokenizer.model"))
-    # TODO: we should keep cache for the 'prefix' part 
-    # and figure out how to make the correct update
-    #encoded_prefix = tokenizer.encode(prefix)
 
-    # one of the suffixes must be empty
-
+    # TODO: we should keep kv cache for the 'prefix' part
     prompts = [prefix + s for s in suffixes]
 
     prompt_lens = [len(x) for x in prompts]
@@ -370,6 +367,50 @@ def pick_next_suffix(prefix, suffixes, model_path):
         print(f'currently found: {current}')
     print(tokenizer.decode(current))
 
+def pick_longest_match(prefix, suffixes, model_path):
+    tokenizer = Tokenizer(str(Path(model_path) / "tokenizer.model"))
+
+    # TODO: we should keep kv cache for the 'prefix' part
+    prompts = [prefix + s for s in suffixes]
+
+    prompt_lens = [len(x) for x in prompts]
+    max_prompt_len = max(prompt_lens)
+
+    input_tokens = torch.full((len(prompts), max_prompt_len), tokenizer.pad_id, dtype=torch.long, device="mps")
+    for i, encoded in enumerate(prompts):
+        input_tokens[i, :len(encoded)] = torch.tensor(encoded).to(input_tokens)
+
+    print(input_tokens)
+
+    model = TransformerShared.from_folder(Path(model_path), max_batch_size=len(suffixes))
+    input_mask = input_tokens != tokenizer.pad_id
+
+    all_positions = torch.arange(0, input_tokens.shape[1]).repeat(input_tokens.shape[0], 1).to('mps')
+    all_positions = all_positions * input_mask
+    logits = model.forward(input_tokens, all_positions, prompt_lens)
+    logprobs = nn.functional.log_softmax(logits, dim=-1)
+
+    best = []
+    for i, candidate in enumerate(suffixes):
+        l = len(candidate)
+        curr = []
+        for j in range(l + 1):
+            li = len(prefix) + j - 1
+#        for li in range(len(prefix) - 1, len(prefix) + l):
+            tok = torch.argmax(logprobs[i, li,:], dim=-1)
+            
+            curr.append(tok)
+            if (j < l and tok != candidate[j]):
+                # first non-matching token    
+                break
+            #print(f'{i} {l} {li} {tok}')
+        print(curr)
+        if len(curr) > len(best):
+            best = curr
+
+    return best
+
 
 if __name__ == '__main__':
-    pick_next_suffix([1, 330, 365, 334], [[], [384], [384, 413], [384, 401], [384, 413, 401], [384, 401, 413]], sys.argv[1])
+    #pick_next_suffix([1, 330, 365, 334], [[], [384], [384, 413], [384, 401], [384, 413, 401], [384, 401, 413]], sys.argv[1])
+    print(pick_longest_match([1, 330, 365, 334], [[384, 413, 401], [384, 401, 413]], sys.argv[1]))
