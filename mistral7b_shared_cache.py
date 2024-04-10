@@ -9,6 +9,7 @@ import torch
 import logging
 from mistral7b_conf import ModelArgs
 import os
+import sys
 
 def repeat_kv(keys: torch.Tensor, values: torch.Tensor, repeats: int):
     keys = torch.repeat_interleave(keys, repeats=repeats, dim=2)
@@ -289,6 +290,16 @@ class Tokenizer:
 
     def decode(self, t: List[int]) -> str:
         return self._model.decode(t)
+    
+def gen_next_token_batch(input_tokens, prompt_lens, model: TransformerShared, tokenizer: Tokenizer):
+    input_mask = input_tokens != tokenizer.pad_id
+
+    all_positions = torch.arange(0, input_tokens.shape[1]).repeat(input_tokens.shape[0], 1).to('mps')
+    all_positions = all_positions * input_mask
+    logits = model.forward(input_tokens, all_positions, prompt_lens)
+
+    logprobs = nn.functional.log_softmax(logits, dim=-1)
+    return [torch.argmax(logprobs[i, l - 1,:], dim=-1) for i, l in enumerate(prompt_lens)]
 
 @torch.no_grad()
 def gen_single_token(prompts: List[str], model: TransformerShared, tokenizer: Tokenizer):
@@ -299,18 +310,40 @@ def gen_single_token(prompts: List[str], model: TransformerShared, tokenizer: To
     input_tokens = torch.full((len(prompts), max_prompt_len), tokenizer.pad_id, dtype=torch.long, device="mps")
     for i, encoded in enumerate(encoded_prompts):
         input_tokens[i, :len(encoded)] = torch.tensor(encoded).to(input_tokens)
-    input_mask = input_tokens != tokenizer.pad_id
-
-    all_positions = torch.arange(0, input_tokens.shape[1]).repeat(input_tokens.shape[0], 1).to('mps')
-    all_positions = all_positions * input_mask
-    logits = model.forward(input_tokens, all_positions, prompt_lens)
-
-    logprobs = nn.functional.log_softmax(logits, dim=-1)
-    next_tokens = [torch.argmax(logprobs[i, l - 1,:], dim=-1) for i, l in enumerate(prompt_lens)]
+    
+    next_tokens = gen_next_token_batch(input_tokens, prompt_lens, model, tokenizer)
 
     res = []
     for i, x in enumerate(encoded_prompts):
         v = tokenizer.decode(x + [next_tokens[i].item()])
-        logging.info(v)
         res.append(v)
     return res
+
+def pick_suffix(prefix, suffixes, model_path):
+    tokenizer = Tokenizer(str(Path(model_path) / "tokenizer.model"))
+    # TODO: we should keep cache for the 'prefix' part 
+    # and figure out how to make the correct update
+    encoded_prefix = tokenizer.encode(prefix)
+
+    # one of the suffixes must be empty
+    encoded = [tokenizer.encode(prefix + s) for s in suffixes]
+    print(encoded_prefix)
+    print(encoded)
+
+    prompt_lens = [len(x) for x in encoded]
+    max_prompt_len = max(prompt_lens)
+
+    input_tokens = torch.full((len(encoded), max_prompt_len), tokenizer.pad_id, dtype=torch.long, device="mps")
+    for i, encoded in enumerate(encoded):
+        input_tokens[i, :len(encoded)] = torch.tensor(encoded).to(input_tokens)
+
+    print(input_tokens)
+
+    model = TransformerShared.from_folder(Path(model_path), max_batch_size=len(suffixes))
+
+    next_tokens = gen_next_token_batch(input_tokens, prompt_lens, model, tokenizer)
+    print(next_tokens)
+
+
+if __name__ == '__main__':
+    pick_suffix('A B C', ['', ' D', ' D E', ' D F', ' D E F', ' D F E'], sys.argv[1])
