@@ -240,11 +240,11 @@ class TransformerShared(nn.Module):
         prompt_lens
     ):
         h = self.tok_embeddings(input_ids)
+
+        # this became 3d tensor in contrast with more typical 2d. 
+        # we can look at it later nad make it back to 2d.
         freqs_cos = self.freqs_cos[positions]
         freqs_sin = self.freqs_sin[positions]
-
-        #print(freqs_cos)
-        #print(freqs_sin)
 
         mask: Optional[torch.Tensor] = None
         if input_ids.shape[1] > 1:
