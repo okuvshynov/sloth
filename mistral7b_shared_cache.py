@@ -1,5 +1,12 @@
 # modified version of one_file_ref.py by mistral-ai, Apache Licence 2.0
 
+
+# this implementation focuses on inference for the speculative tree-like decoding
+# - We do have kv-cache but just 1 of them, rather than batch_size
+# - After each tree evaluation we pick the longest matching subsequence
+# - (and we'll need to update cache for that)
+# - cache is for the shared prefix
+
 from pathlib import Path
 from sentencepiece import SentencePieceProcessor
 from torch import nn
@@ -332,41 +339,6 @@ def gen_single_token(prompts: List[str], model: TransformerShared, tokenizer: To
         res.append(v)
     return res
 
-# suffixes here are full paths from root to leaf
-def pick_next_suffix(prefix, suffixes, model_path):
-    tokenizer = Tokenizer(str(Path(model_path) / "tokenizer.model"))
-
-    # TODO: we should keep kv cache for the 'prefix' part
-    prompts = [prefix + s for s in suffixes]
-
-    prompt_lens = [len(x) for x in prompts]
-    max_prompt_len = max(prompt_lens)
-
-    input_tokens = torch.full((len(prompts), max_prompt_len), tokenizer.pad_id, dtype=torch.long, device="mps")
-    for i, encoded in enumerate(prompts):
-        input_tokens[i, :len(encoded)] = torch.tensor(encoded).to(input_tokens)
-
-    print(input_tokens)
-
-    model = TransformerShared.from_folder(Path(model_path), max_batch_size=len(suffixes))
-
-    next_tokens = gen_next_token_batch(input_tokens, prompt_lens, model, tokenizer)
-    print(next_tokens)
-
-    current = prefix
-    while True:
-        for i, input in enumerate(prompts):
-            found = False
-            if input == current:
-                next = next_tokens[i].item()
-                current.append(next)
-                found = True
-                break
-        if not found:
-            break
-        print(f'currently found: {current}')
-    print(tokenizer.decode(current))
-
 def pick_longest_match(prefix, suffixes, model_path):
     tokenizer = Tokenizer(str(Path(model_path) / "tokenizer.model"))
 
@@ -396,21 +368,19 @@ def pick_longest_match(prefix, suffixes, model_path):
         curr = []
         for j in range(l + 1):
             li = len(prefix) + j - 1
-#        for li in range(len(prefix) - 1, len(prefix) + l):
             tok = torch.argmax(logprobs[i, li,:], dim=-1)
             
             curr.append(tok)
             if (j < l and tok != candidate[j]):
                 # first non-matching token    
                 break
-            #print(f'{i} {l} {li} {tok}')
-        print(curr)
+        #print(curr)
         if len(curr) > len(best):
             best = curr
 
+    # TODO: and write to cache somewhere here?
     return best
 
 
 if __name__ == '__main__':
-    #pick_next_suffix([1, 330, 365, 334], [[], [384], [384, 413], [384, 401], [384, 413, 401], [384, 401, 413]], sys.argv[1])
-    print(pick_longest_match([1, 330, 365, 334], [[384, 413, 401], [384, 401, 413]], sys.argv[1]))
+    print(pick_longest_match([1, 330, 365, 334], [[], [123], [384, 413, 401], [384, 401, 413]], sys.argv[1]))
