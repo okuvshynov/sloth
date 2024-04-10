@@ -77,9 +77,9 @@ class Attention(nn.Module):
             bias=False
         )
         """
-                self.cache_k = torch.empty(
+        self.cache_k = torch.empty(
             (
-                args.max_batch_size,
+                1,
                 args.sliding_window,
                 self.n_kv_heads,
                 self.args.head_dim,
@@ -87,12 +87,12 @@ class Attention(nn.Module):
         ).to('mps')
         self.cache_v = torch.empty(
             (
-                args.max_batch_size,
+                1,
                 args.sliding_window,
                 self.n_kv_heads,
                 self.args.head_dim,
             ), dtype=torch.float16
-        ).to('mps')
+        ).to('mps')        
         """
 
 
@@ -124,6 +124,8 @@ class Attention(nn.Module):
         
         output = torch.matmul(scores, value)  # (bs, n_local_heads, slen, head_dim)
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
+        
+        # TODO: are we sure about this 
         output = torch.nan_to_num(output)
         
         return self.wo(output)
@@ -234,6 +236,9 @@ class TransformerShared(nn.Module):
         freqs_cos = self.freqs_cos[positions]
         freqs_sin = self.freqs_sin[positions]
 
+        print(freqs_cos)
+        #print(freqs_sin)
+
         mask: Optional[torch.Tensor] = None
         if input_ids.shape[1] > 1:
             bsz, n = input_ids.shape
@@ -299,6 +304,14 @@ def gen_next_token_batch(input_tokens, prompt_lens, model: TransformerShared, to
     logits = model.forward(input_tokens, all_positions, prompt_lens)
 
     logprobs = nn.functional.log_softmax(logits, dim=-1)
+
+    min_len = min(prompt_lens)
+    for i, l in enumerate(prompt_lens):
+        for li in range(min_len - 1, l):
+            tok = torch.argmax(logprobs[i, li,:], dim=-1)
+            print(f'{i} {l} {li} {tok}')
+        print()
+
     return [torch.argmax(logprobs[i, l - 1,:], dim=-1) for i, l in enumerate(prompt_lens)]
 
 @torch.no_grad()
@@ -319,41 +332,15 @@ def gen_single_token(prompts: List[str], model: TransformerShared, tokenizer: To
         res.append(v)
     return res
 
-def pick_suffix(prefix, suffixes, model_path):
-    tokenizer = Tokenizer(str(Path(model_path) / "tokenizer.model"))
-    # TODO: we should keep cache for the 'prefix' part 
-    # and figure out how to make the correct update
-    encoded_prefix = tokenizer.encode(prefix)
-
-    # one of the suffixes must be empty
-    encoded = [tokenizer.encode(prefix + s) for s in suffixes]
-    print(encoded_prefix)
-    print(encoded)
-
-    prompt_lens = [len(x) for x in encoded]
-    max_prompt_len = max(prompt_lens)
-
-    input_tokens = torch.full((len(encoded), max_prompt_len), tokenizer.pad_id, dtype=torch.long, device="mps")
-    for i, encoded in enumerate(encoded):
-        input_tokens[i, :len(encoded)] = torch.tensor(encoded).to(input_tokens)
-
-    print(input_tokens)
-
-    model = TransformerShared.from_folder(Path(model_path), max_batch_size=len(suffixes))
-
-    next_tokens = gen_next_token_batch(input_tokens, prompt_lens, model, tokenizer)
-    print(next_tokens)
-
-def pick_suffix2(prefix, suffixes, model_path):
+def pick_next_suffix(prefix, suffixes, model_path):
     tokenizer = Tokenizer(str(Path(model_path) / "tokenizer.model"))
     # TODO: we should keep cache for the 'prefix' part 
     # and figure out how to make the correct update
     #encoded_prefix = tokenizer.encode(prefix)
 
     # one of the suffixes must be empty
+
     prompts = [prefix + s for s in suffixes]
-    print(prefix)
-    print(prompts)
 
     prompt_lens = [len(x) for x in prompts]
     max_prompt_len = max(prompt_lens)
@@ -368,7 +355,6 @@ def pick_suffix2(prefix, suffixes, model_path):
 
     next_tokens = gen_next_token_batch(input_tokens, prompt_lens, model, tokenizer)
     print(next_tokens)
-
 
     current = prefix
     while True:
@@ -386,6 +372,4 @@ def pick_suffix2(prefix, suffixes, model_path):
 
 
 if __name__ == '__main__':
-    #pick_suffix('A B C', ['', ' D', ' D E', ' D F', ' D E F', ' D F E', ' D F E G'], sys.argv[1])
-
-    pick_suffix2([1, 330, 365, 334], [[], [384], [384, 413], [384, 401], [384, 413, 401], [384, 401, 413]], sys.argv[1])
+    pick_next_suffix([1, 330, 365, 334], [[], [384], [384, 413], [384, 401], [384, 413, 401], [384, 401, 413]], sys.argv[1])
