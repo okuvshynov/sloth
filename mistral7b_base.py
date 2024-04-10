@@ -11,9 +11,6 @@ import logging
 from mistral7b_conf import ModelArgs
 import os
 
-from fewlines import timer as ft
-from fewlines import dashboard as fd
-
 def repeat_kv(keys: torch.Tensor, values: torch.Tensor, repeats: int):
     keys = torch.repeat_interleave(keys, repeats=repeats, dim=2)
     values = torch.repeat_interleave(values, repeats=repeats, dim=2)
@@ -198,11 +195,9 @@ class TransformerBlock(nn.Module):
     def forward(
             self, x: torch.Tensor, freqs_cos: torch.Tensor, freqs_sin: torch.Tensor, positions: torch.Tensor, mask: Optional[torch.Tensor]
     ) -> torch.Tensor:
-        with ft.Timer('attention') as _:
-            r = self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin, positions, mask)
+        r = self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin, positions, mask)
         h = x + r
-        with ft.Timer('feed_forward') as _:
-            r = self.feed_forward.forward(self.ffn_norm(h))
+        r = self.feed_forward.forward(self.ffn_norm(h))
         out = h + r
         return out
 
@@ -337,18 +332,17 @@ def generate(prompts: List[str], model: Transformer, tokenizer: Tokenizer, max_t
     ]
     cur_pos = min_prompt_len
     for _ in range(max_tokens):
-        with ft.Timer('one_token') as _:
-            next_token = torch.argmax(logprobs[:, -1,:], dim=-1)
-            if cur_pos < input_mask.shape[1]:
-                next_token = torch.where(input_mask[:, cur_pos], input_tokens[:, cur_pos], next_token)
-            all_logprobs.append(
-                logprobs[:,-1,:].gather(1, next_token[:, None]),
-            )
-            generated.append(next_token[:, None])
+        next_token = torch.argmax(logprobs[:, -1,:], dim=-1)
+        if cur_pos < input_mask.shape[1]:
+            next_token = torch.where(input_mask[:, cur_pos], input_tokens[:, cur_pos], next_token)
+        all_logprobs.append(
+            logprobs[:,-1,:].gather(1, next_token[:, None]),
+        )
+        generated.append(next_token[:, None])
 
-            logits = model.forward(next_token[:, None], torch.LongTensor([cur_pos]).to(next_token))
-            logprobs = nn.functional.log_softmax(logits, dim=-1)
-            cur_pos += 1
+        logits = model.forward(next_token[:, None], torch.LongTensor([cur_pos]).to(next_token))
+        logprobs = nn.functional.log_softmax(logits, dim=-1)
+        cur_pos += 1
 
     all_logprobs = torch.cat(all_logprobs, 1)
     res = []
@@ -374,13 +368,10 @@ def demo(model_path: str, max_tokens: int = 35):
         tokenizer,
         max_tokens=max_tokens,
     )
-    for l in fd.histograms('*', color='green'):
-        logging.info(l)
     for x in res:
         logging.info(x)
         logging.info("=====================")
 
-    
 
 if __name__ == "__main__":
     logging.basicConfig(format='%(asctime)s %(message)s', level=logging.INFO)
