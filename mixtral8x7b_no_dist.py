@@ -15,19 +15,19 @@ from blackbox import BlackboxDisk
 
 @dataclass
 class MoeArgs(Serializable):
-    num_experts: int
-    num_experts_per_tok: int
+    num_experts: int         #8
+    num_experts_per_tok: int #2
 
 @dataclass
 class ModelArgs(Serializable):
-    dim: int
-    n_layers: int
-    head_dim: int
-    hidden_dim: int
-    n_heads: int
-    n_kv_heads: int
-    norm_eps: float
-    vocab_size: int
+    dim: int         # 4096
+    n_layers: int    # 32
+    head_dim: int    # 128
+    hidden_dim: int  # 14336
+    n_heads: int     # 32
+    n_kv_heads: int  # 8
+    norm_eps: float  # 1e-05
+    vocab_size: int  # 32000
     moe: MoeArgs
 
     max_batch_size: int = 0
@@ -85,17 +85,17 @@ class Attention(nn.Module):
         super().__init__()
         self.args = args
 
-        self.n_heads: int = args.n_heads
-        self.n_kv_heads: int = args.n_kv_heads
+        self.n_heads: int = args.n_heads        # 32
+        self.n_kv_heads: int = args.n_kv_heads  # 8
 
-        self.repeats = self.n_heads // self.n_kv_heads
+        self.repeats = self.n_heads // self.n_kv_heads # 4
 
         self.scale = self.args.head_dim**-0.5
 
-        self.wq = nn.Linear(args.dim, args.n_heads * args.head_dim, bias=False)
-        self.wk = nn.Linear(args.dim, args.n_kv_heads * args.head_dim, bias=False)
-        self.wv = nn.Linear(args.dim, args.n_kv_heads * args.head_dim, bias=False)
-        self.wo = nn.Linear(args.n_heads * args.head_dim, args.dim, bias=False)
+        self.wq = nn.Linear(args.dim, args.n_heads * args.head_dim, bias=False)     # 4096 x 4096
+        self.wk = nn.Linear(args.dim, args.n_kv_heads * args.head_dim, bias=False)  # 4096 x 1024
+        self.wv = nn.Linear(args.dim, args.n_kv_heads * args.head_dim, bias=False)  # 4096 x 1024
+        self.wo = nn.Linear(args.n_heads * args.head_dim, args.dim, bias=False)     # 4096 x 4096
         self._cache_k: Optional[torch.Tensor] = None
         self._cache_v: Optional[torch.Tensor] = None
 
@@ -108,8 +108,8 @@ class Attention(nn.Module):
                 (
                     self.args.max_batch_size,
                     self.args.max_seq_len,
-                    self.n_kv_heads,
-                    self.args.head_dim,
+                    self.n_kv_heads,    # 8
+                    self.args.head_dim, # 128
                 ),
                 dtype=dtype,
                 device=device,
