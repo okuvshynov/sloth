@@ -392,56 +392,13 @@ def gen_single_token(prompts: List[str], model: TransformerShared, tokenizer: To
         res.append(v)
     return res
 
-def pick_longest_match(prefix, suffixes, model_path):
-    tokenizer = Tokenizer(str(Path(model_path) / "tokenizer.model"))
-
-    # TODO: we should keep kv cache for the 'prefix' part
-    prompts = [prefix + s for s in suffixes]
-
-    prompt_lens = [len(x) for x in prompts]
-    max_prompt_len = max(prompt_lens)
-
-    input_tokens = torch.full((len(prompts), max_prompt_len), tokenizer.pad_id, dtype=torch.long, device="mps")
-    for i, encoded in enumerate(prompts):
-        input_tokens[i, :len(encoded)] = torch.tensor(encoded).to(input_tokens)
-
-    print(f'input tokens = {input_tokens}')
-
-    model = TransformerShared.from_folder(Path(model_path), max_batch_size=len(suffixes))
-    input_mask = input_tokens != tokenizer.pad_id
-
-    all_positions = torch.arange(0, input_tokens.shape[1]).repeat(input_tokens.shape[0], 1).to('mps')
-    all_positions = all_positions * input_mask
-    logits = model.forward(input_tokens, all_positions, prompt_lens)
-    logprobs = nn.functional.log_softmax(logits, dim=-1)
-
-    best = []
-    best_i = -1
-    for i, candidate in enumerate(suffixes):
-        l = len(candidate)
-        curr = []
-        for j in range(l + 1):
-            li = len(prefix) + j - 1
-            tok = torch.argmax(logprobs[i, li,:], dim=-1)
-            
-            curr.append(tok)
-            if (j < l and tok != candidate[j]):
-                # first non-matching token    
-                break
-        #print(curr)
-        if len(curr) > len(best):
-            best = curr
-            best_i = i
-
-    # TODO: and write to cache somewhere here?
-    return best
-
 def apply_tree(model_path):
     prefix = [1, 330, 365, 334] # A B C
     suffixes_m = [
         [[384], [384, 333], [384, 413, 401], [384, 401, 413]],
         [[420], [420, 444], [420, 382], [420, 315]],
-        [[315], [315, 315], [315, 375], [315, 375, 876]]
+        [[315], [315, 315], [315, 375], [315, 375, 876]],
+        [[475, 524], [475], [475, 393]],
     ]
     max_batch_size = max(len(s) for s in suffixes_m)
     print(f'max_batch_size = {max_batch_size}')
