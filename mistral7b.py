@@ -57,6 +57,7 @@ class Attention(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.args = args
+        self.dbg = False
 
         self.n_heads: int = args.n_heads
         self.n_kv_heads: int = args.n_kv_heads
@@ -117,23 +118,39 @@ class Attention(nn.Module):
         
         # The cache is a rotating buffer
         scatter_pos = (positions[-self.sliding_window:] % self.sliding_window)[None, :, None, None]
+        if self.dbg:
+            print(scatter_pos)
         scatter_pos = scatter_pos.repeat(bsz, 1, self.n_kv_heads, self.args.head_dim)
+        if self.dbg:
+            print(scatter_pos.shape)
+            print(scatter_pos)
         self.cache_k[:bsz].scatter_(dim=1, index=scatter_pos, src=xk[:, -self.sliding_window:])
         self.cache_v[:bsz].scatter_(dim=1, index=scatter_pos, src=xv[:, -self.sliding_window:])
 
+        if self.dbg:
+            print(f'xk, xv shapes {xk.shape}, {xv.shape}')
 
         if positions.shape[0] > 1:
             # prefill
             key, value = repeat_kv(xk, xv, self.repeats)
+            if self.dbg:
+                print(f'key, value shapes {key.shape}, {value.shape}')
         else:
             cur_pos = positions[-1].item() + 1
+            if self.dbg:
+                print(f'cache shapes shapes {self.cache_k.shape}, {self.cache_v.shape}')
             key, value = repeat_kv(self.cache_k[:bsz, :cur_pos, ...], self.cache_v[:bsz, :cur_pos, ...], self.repeats)
+            if self.dbg:
+                print(f'key, value from cache shapes {key.shape}, {value.shape}')
             
         query = xq.transpose(1, 2)
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
         # scores : [bsz, n_heads, seqlen | 1, seqlen]
         scores = torch.matmul(query, key.transpose(2, 3)) * self.scale
+
+        if self.dbg:
+            print(scores.shape)
         
         if mask is not None:
             scores += mask[None, None, ...]
@@ -225,6 +242,8 @@ class Transformer(nn.Module):
         self.layers = torch.nn.ModuleList(
             [TransformerBlock(args=args) for _ in range(args.n_layers)]
         )
+
+        self.layers[0].attention.dbg = True
 
         self.norm = RMSNorm(args.dim, eps=args.norm_eps)
 

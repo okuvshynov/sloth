@@ -54,6 +54,7 @@ class Attention(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
         self.args = args
+        self.dbg = False
 
         self.n_heads: int = args.n_heads
         self.n_kv_heads: int = args.n_kv_heads
@@ -83,7 +84,9 @@ class Attention(nn.Module):
             args.dim,
             bias=False
         )
-        """
+
+        # This is shared cache for all suffixes.
+        # A cache for already 'confirmed' sequence
         self.cache_k = torch.empty(
             (
                 1,
@@ -100,14 +103,35 @@ class Attention(nn.Module):
                 self.args.head_dim,
             ), dtype=torch.float16
         ).to('mps')        
-        """
+
+        # this is local cache.
+        # after each iteration once we decided how much/if at all we reuse
+        # we merge data from selected cache with longest match to the shared cache
+        self.local_cache_k = torch.empty(
+            (
+                args.max_batch_size,
+                args.max_speculative_seq,
+                self.n_kv_heads,
+                self.args.head_dim,
+            ), dtype=torch.float16
+        ).to('mps')
+        self.local_cache_v = torch.empty(
+            (
+                args.max_batch_size,
+                args.max_speculative_seq,
+                self.n_kv_heads,
+                self.args.head_dim,
+            ), dtype=torch.float16
+        ).to('mps')        
 
 
-    def forward_all_no_cache(
+    # there needs to be another method for prefilling main cache
+    def forward(
             self, x: torch.Tensor, freqs_cos: torch.Tensor, freqs_sin: torch.Tensor, positions: torch.Tensor, mask: Optional[torch.Tensor]
     ) -> torch.Tensor:
         
         bsz, seqlen, _ = x.shape
+        assert seqlen <= self.args.max_speculative_seq
 
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
         xq = xq.view(bsz, seqlen, self.n_heads, self.args.head_dim)
@@ -115,16 +139,43 @@ class Attention(nn.Module):
         xv = xv.view(bsz, seqlen, self.n_kv_heads, self.args.head_dim)
         xq, xk = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin)
 
-        key, value = repeat_kv(xk, xv, self.repeats)
+        # here we need to: 
+        #  1. Fill in local_caches
+        #  2. populate key/value from global cache
+
+        self.local_cache_k[:bsz, :seqlen] = xk
+        self.local_cache_v[:bsz, :seqlen] = xv
+
+        # now we need to merge data from global cache and new xk/xv
+        # global cache would have shape [1, sliding_window, n_kv_heads, head_dim] == [1, 4096, 8, 128]
+        # xk, xv would have shape [bsz, seqlen, n_kv_heads, head_dim] == [?, <, 8, 128]
+
+        # key, value should have shape
+        # [bsz, position[-1] + seqlen, n_kv_heads, head_dim] and then we repeat it over dim=2
+
+        if self.dbg:
+            print(positions)
+
+        # TODO: just pass single pos here?
+        prev_pos = positions[0][0].item()
+        key = torch.cat((self.cache_k[:, :prev_pos, ...].expand(bsz, -1, -1, -1), xk), dim=1)
+        if self.dbg:
+            print(key)
+        value = torch.cat((self.cache_v[:, :prev_pos, ...].expand(bsz, -1, -1, -1), xv), dim=1)
+
+        key, value = repeat_kv(key, value, self.repeats)
 
         query = xq.transpose(1, 2)
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
         # scores : [bsz, n_heads, seqlen | 1, seqlen]
         scores = torch.matmul(query, key.transpose(2, 3)) * self.scale
+
+        if self.dbg:
+            print(scores.shape, mask.shape)
         
         if mask is not None:
-            scores += mask[:, None, :, :]
+            scores[:, :, :, -seqlen:] += mask[:, None, :, :]
         
         scores = scores.float()
         scores = nn.functional.softmax(scores, dim=-1).type_as(query)
@@ -190,7 +241,7 @@ class TransformerBlock(nn.Module):
     def forward_all(
             self, x: torch.Tensor, freqs_cos: torch.Tensor, freqs_sin: torch.Tensor, positions: torch.Tensor, mask: Optional[torch.Tensor]
     ) -> torch.Tensor:
-        r = self.attention.forward_all_no_cache(self.attention_norm(x), freqs_cos, freqs_sin, positions, mask)
+        r = self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin, positions, mask)
         h = x + r
         r = self.feed_forward.forward(self.ffn_norm(h))
         out = h + r
@@ -218,6 +269,7 @@ class TransformerShared(nn.Module):
         self.layers = torch.nn.ModuleList(
             [TransformerBlock(args=args) for _ in range(args.n_layers)]
         )
+        self.layers[0].attention.dbg = True
 
         self.norm = RMSNorm(args.dim, eps=args.norm_eps)
 
@@ -272,6 +324,7 @@ class TransformerShared(nn.Module):
         with open(folder / 'params.json', 'r') as f:
             model_args = ModelArgs(**json.loads(f.read()))
         model_args.max_batch_size = max_batch_size
+        model_args.max_speculative_seq = 8
         logging.info('creating model instance')
         model = TransformerShared(model_args).to(device=device, dtype=dtype)
         logging.info('loading checkpoint')
@@ -363,6 +416,7 @@ def pick_longest_match(prefix, suffixes, model_path):
     logprobs = nn.functional.log_softmax(logits, dim=-1)
 
     best = []
+    best_i = -1
     for i, candidate in enumerate(suffixes):
         l = len(candidate)
         curr = []
@@ -377,10 +431,83 @@ def pick_longest_match(prefix, suffixes, model_path):
         #print(curr)
         if len(curr) > len(best):
             best = curr
+            best_i = i
 
     # TODO: and write to cache somewhere here?
     return best
 
+def apply_tree(prefix, suffixes, model_path):
+    model = TransformerShared.from_folder(Path(model_path), max_batch_size=len(suffixes))
+    tokenizer = Tokenizer(str(Path(model_path) / "tokenizer.model"))
+
+
+    # do in two steps now:
+    # 1. populate prefix
+    # 2. evaluate suffixes
+
+    seq_len = len(prefix)
+
+    input_tokens = torch.full((1, len(prefix)), tokenizer.pad_id, dtype=torch.long, device="mps")
+    input_tokens[0, :] = torch.tensor(prefix).to(input_tokens)
+    print(input_tokens)
+    all_positions = torch.arange(0, input_tokens.shape[1]).repeat(input_tokens.shape[0], 1).to('mps')
+    logits = model.forward(input_tokens, all_positions, [len(prefix)])
+    logprobs = nn.functional.log_softmax(logits, dim=-1)
+    next_token = torch.argmax(logprobs[:, -1,:], dim=-1)
+
+    print(next_token)
+    #print(model.layers[0].attention.local_cache_v)
+    #print(model.layers[0].attention.local_cache_k)
+    #print(model.layers[0].attention.cache_k.shape)
+
+    for layer in model.layers:
+        layer.attention.cache_k[0, :seq_len] = layer.attention.local_cache_k[0, :seq_len]
+        layer.attention.cache_v[0, :seq_len] = layer.attention.local_cache_v[0, :seq_len]
+
+
+    # now evaluate some options
+    prompt_lens = [len(x) for x in suffixes]
+    max_prompt_len = max(prompt_lens)
+
+    input_tokens = torch.full((len(suffixes), max_prompt_len), tokenizer.pad_id, dtype=torch.long, device="mps")
+    for i, encoded in enumerate(suffixes):
+        input_tokens[i, :len(encoded)] = torch.tensor(encoded).to(input_tokens)
+
+    print(input_tokens)
+
+    input_mask = input_tokens != tokenizer.pad_id
+
+    all_positions = torch.arange(seq_len, seq_len + input_tokens.shape[1]).repeat(input_tokens.shape[0], 1).to('mps')
+    all_positions = all_positions * input_mask
+
+    print(all_positions)
+
+    logits = model.forward(input_tokens, all_positions, prompt_lens)
+    logprobs = nn.functional.log_softmax(logits, dim=-1)
+    print(logprobs.shape)
+
+    print(torch.argmax(logprobs, dim=2))
+
+    best = []
+    best_i = -1
+    for i, candidate in enumerate(suffixes):
+        l = len(candidate)
+        curr = []
+        for j in range(l):
+            tok = torch.argmax(logprobs[i, j,:], dim=-1)
+            
+            curr.append(tok)
+            if (j + 1 < l and tok != candidate[j + 1]):
+                # first non-matching token    
+                break
+        #print(curr)
+        if len(curr) > len(best):
+            best = curr
+            best_i = i
+
+    # TODO: and write to cache somewhere here?
+    return best
 
 if __name__ == '__main__':
-    print(pick_longest_match([1, 330, 365, 334], [[], [123], [384, 413, 401], [384, 401, 413]], sys.argv[1]))
+    #print(pick_longest_match([1, 330, 365, 334], [[], [123], [384, 413, 401], [384, 401, 413]], sys.argv[1]))
+    print(apply_tree([1, 330, 365, 334], [[384], [384, 333], [384, 413, 401], [384, 401, 413]], sys.argv[1]))
