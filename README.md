@@ -1,6 +1,6 @@
 # sloth
 
-1. Caching. Make sure it works on M7 
+1. [done] Caching. Make sure it works on M7. Make more tests.
 2. Correctness tests on M7, M7x8
 3. Performance study - use the typical qna workload - inputs of varying sizes - from 50 tokens to 5000 tokens, output typically ~500.
 4. What should be the small model? - quantized same model? 4x smaller? 8x smaller?
