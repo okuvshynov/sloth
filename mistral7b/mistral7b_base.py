@@ -360,9 +360,9 @@ def demo(model_path: str, max_tokens: int = 35):
 
     res, _logprobs = generate(
         [
-            #"This is a test",
+            "This is a test",
             #"This is another test",
-            "This is a third test, mistral AI is very good at testing. ",
+            #"This is a third test, mistral AI is very good at testing. ",
         ],
         transformer,
         tokenizer,
