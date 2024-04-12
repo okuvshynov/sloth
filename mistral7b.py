@@ -243,7 +243,7 @@ class Transformer(nn.Module):
             [TransformerBlock(args=args) for _ in range(args.n_layers)]
         )
 
-        self.layers[0].attention.dbg = True
+        #self.layers[0].attention.dbg = True
 
         self.norm = RMSNorm(args.dim, eps=args.norm_eps)
 
@@ -366,6 +366,7 @@ def generate(prompts: List[str], model: Transformer, tokenizer: Tokenizer, max_t
     cur_pos = min_prompt_len
     for _ in range(max_tokens):
         next_token = torch.argmax(logprobs[:, -1,:], dim=-1)
+        print(next_token)
         if cur_pos < input_mask.shape[1]:
             next_token = torch.where(input_mask[:, cur_pos], input_tokens[:, cur_pos], next_token)
         all_logprobs.append(
@@ -392,9 +393,10 @@ def demo(model_path: str, max_tokens: int = 35):
 
     res, _logprobs = generate(
         [
-            "This is a test",
-            "This is another test",
-            "This is a third test, mistral AI is very good at testing. ",
+            #"This is a test",
+            #"This is another test",
+            #"This is a third test, mistral AI is very good at testing. ",
+            "A B C D E"
         ],
         transformer,
         tokenizer,

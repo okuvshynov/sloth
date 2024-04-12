@@ -269,7 +269,7 @@ class TransformerShared(nn.Module):
         self.layers = torch.nn.ModuleList(
             [TransformerBlock(args=args) for _ in range(args.n_layers)]
         )
-        self.layers[0].attention.dbg = True
+        #self.layers[0].attention.dbg = True
 
         self.norm = RMSNorm(args.dim, eps=args.norm_eps)
 
@@ -405,7 +405,7 @@ def pick_longest_match(prefix, suffixes, model_path):
     for i, encoded in enumerate(prompts):
         input_tokens[i, :len(encoded)] = torch.tensor(encoded).to(input_tokens)
 
-    print(input_tokens)
+    print(f'input tokens = {input_tokens}')
 
     model = TransformerShared.from_folder(Path(model_path), max_batch_size=len(suffixes))
     input_mask = input_tokens != tokenizer.pad_id
@@ -436,78 +436,96 @@ def pick_longest_match(prefix, suffixes, model_path):
     # TODO: and write to cache somewhere here?
     return best
 
-def apply_tree(prefix, suffixes, model_path):
-    model = TransformerShared.from_folder(Path(model_path), max_batch_size=len(suffixes))
+def apply_tree(model_path):
+    prefix = [1, 330, 365, 334] # A B C
+    suffixes_m = [
+        [[384], [384, 333], [384, 413, 401], [384, 401, 413]],
+        [[420], [420, 444], [420, 382], [420, 315]],
+        [[315], [315, 315], [315, 375], [315, 375, 876]]
+    ]
+    max_batch_size = max(len(s) for s in suffixes_m)
+    print(f'max_batch_size = {max_batch_size}')
+
+    model = TransformerShared.from_folder(Path(model_path), max_batch_size=max_batch_size)
     tokenizer = Tokenizer(str(Path(model_path) / "tokenizer.model"))
 
-
-    # do in two steps now:
+    # do in two steps:
     # 1. populate prefix
     # 2. evaluate suffixes
 
-    seq_len = len(prefix)
 
     input_tokens = torch.full((1, len(prefix)), tokenizer.pad_id, dtype=torch.long, device="mps")
     input_tokens[0, :] = torch.tensor(prefix).to(input_tokens)
-    print(input_tokens)
+    print(f'input_tokens: {input_tokens}')
     all_positions = torch.arange(0, input_tokens.shape[1]).repeat(input_tokens.shape[0], 1).to('mps')
     logits = model.forward(input_tokens, all_positions, [len(prefix)])
     logprobs = nn.functional.log_softmax(logits, dim=-1)
     next_token = torch.argmax(logprobs[:, -1,:], dim=-1)
 
-    print(next_token)
+    print(f'next_token {next_token}')
     #print(model.layers[0].attention.local_cache_v)
     #print(model.layers[0].attention.local_cache_k)
     #print(model.layers[0].attention.cache_k.shape)
 
+    seq_len = len(prefix)
+    curr_pos = seq_len
     for layer in model.layers:
         layer.attention.cache_k[0, :seq_len] = layer.attention.local_cache_k[0, :seq_len]
         layer.attention.cache_v[0, :seq_len] = layer.attention.local_cache_v[0, :seq_len]
 
+    for si, suffixes in enumerate(suffixes_m):
+        # now evaluate some options
+        prompt_lens = [len(x) for x in suffixes]
+        max_prompt_len = max(prompt_lens)
 
-    # now evaluate some options
-    prompt_lens = [len(x) for x in suffixes]
-    max_prompt_len = max(prompt_lens)
+        input_tokens = torch.full((len(suffixes), max_prompt_len), tokenizer.pad_id, dtype=torch.long, device="mps")
+        for i, encoded in enumerate(suffixes):
+            input_tokens[i, :len(encoded)] = torch.tensor(encoded).to(input_tokens)
 
-    input_tokens = torch.full((len(suffixes), max_prompt_len), tokenizer.pad_id, dtype=torch.long, device="mps")
-    for i, encoded in enumerate(suffixes):
-        input_tokens[i, :len(encoded)] = torch.tensor(encoded).to(input_tokens)
+        print(f'input_tokens: {input_tokens}')
 
-    print(input_tokens)
+        input_mask = input_tokens != tokenizer.pad_id
 
-    input_mask = input_tokens != tokenizer.pad_id
+        all_positions = torch.arange(curr_pos, curr_pos + input_tokens.shape[1]).repeat(input_tokens.shape[0], 1).to('mps')
+        all_positions = all_positions * input_mask
 
-    all_positions = torch.arange(seq_len, seq_len + input_tokens.shape[1]).repeat(input_tokens.shape[0], 1).to('mps')
-    all_positions = all_positions * input_mask
+        print(f'all_positions {all_positions}')
 
-    print(all_positions)
+        logits = model.forward(input_tokens, all_positions, prompt_lens)
+        logprobs = nn.functional.log_softmax(logits, dim=-1)
+        #print(logprobs.shape)
 
-    logits = model.forward(input_tokens, all_positions, prompt_lens)
-    logprobs = nn.functional.log_softmax(logits, dim=-1)
-    print(logprobs.shape)
+        #print(torch.argmax(logprobs, dim=2))
 
-    print(torch.argmax(logprobs, dim=2))
+        best = []
+        best_i = -1
+        for i, candidate in enumerate(suffixes):
+            l = len(candidate)
+            curr = []
+            for j in range(l):
+                tok = torch.argmax(logprobs[i, j,:], dim=-1)
+                
+                curr.append(tok)
+                if (j + 1 < l and tok != candidate[j + 1]):
+                    # first non-matching token    
+                    break
+            #print(curr)
+            if len(curr) > len(best):
+                best = curr
+                best_i = i
 
-    best = []
-    best_i = -1
-    for i, candidate in enumerate(suffixes):
-        l = len(candidate)
-        curr = []
-        for j in range(l):
-            tok = torch.argmax(logprobs[i, j,:], dim=-1)
-            
-            curr.append(tok)
-            if (j + 1 < l and tok != candidate[j + 1]):
-                # first non-matching token    
-                break
-        #print(curr)
-        if len(curr) > len(best):
-            best = curr
-            best_i = i
+        print(best)
+        # TODO: and write to cache somewhere here?
+        seq_len = len(best)
+        print(seq_len)
+        curr_pos += seq_len
 
-    # TODO: and write to cache somewhere here?
+        for layer in model.layers:
+            layer.attention.cache_k[0, curr_pos:curr_pos+seq_len] = layer.attention.local_cache_k[best_i, :seq_len]
+            layer.attention.cache_v[0, curr_pos:curr_pos+seq_len] = layer.attention.local_cache_v[best_i, :seq_len]
     return best
 
 if __name__ == '__main__':
-    #print(pick_longest_match([1, 330, 365, 334], [[], [123], [384, 413, 401], [384, 401, 413]], sys.argv[1]))
-    print(apply_tree([1, 330, 365, 334], [[384], [384, 333], [384, 413, 401], [384, 401, 413]], sys.argv[1]))
+    #print(pick_longest_match([1, 330, 365, 334], [[], [123], [384, 413, 401], [384, 413, 401, 420], [384, 401, 413]], sys.argv[1]))
+    #print(apply_tree([1, 330, 365, 334], [[384], [384, 333], [384, 413, 401], [384, 401, 413]], sys.argv[1]))
+    apply_tree(sys.argv[1])
