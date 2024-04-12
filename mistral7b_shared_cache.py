@@ -463,9 +463,6 @@ def apply_tree(model_path):
     next_token = torch.argmax(logprobs[:, -1,:], dim=-1)
 
     print(f'next_token {next_token}')
-    #print(model.layers[0].attention.local_cache_v)
-    #print(model.layers[0].attention.local_cache_k)
-    #print(model.layers[0].attention.cache_k.shape)
 
     seq_len = len(prefix)
     curr_pos = seq_len
@@ -474,7 +471,9 @@ def apply_tree(model_path):
         layer.attention.cache_v[0, :seq_len] = layer.attention.local_cache_v[0, :seq_len]
 
     for si, suffixes in enumerate(suffixes_m):
-        # now evaluate some options
+        # TODO: here we already know what next token should be.
+        # filter and if there are no matches just add one token
+
         prompt_lens = [len(x) for x in suffixes]
         max_prompt_len = max(prompt_lens)
 
@@ -482,14 +481,14 @@ def apply_tree(model_path):
         for i, encoded in enumerate(suffixes):
             input_tokens[i, :len(encoded)] = torch.tensor(encoded).to(input_tokens)
 
-        print(f'input_tokens: {input_tokens}')
+        #print(f'input_tokens: {input_tokens}')
 
         input_mask = input_tokens != tokenizer.pad_id
 
         all_positions = torch.arange(curr_pos, curr_pos + input_tokens.shape[1]).repeat(input_tokens.shape[0], 1).to('mps')
         all_positions = all_positions * input_mask
 
-        print(f'all_positions {all_positions}')
+        #print(f'all_positions {all_positions}')
 
         logits = model.forward(input_tokens, all_positions, prompt_lens)
         logprobs = nn.functional.log_softmax(logits, dim=-1)
@@ -514,18 +513,15 @@ def apply_tree(model_path):
                 best = curr
                 best_i = i
 
-        print(best)
-        # TODO: and write to cache somewhere here?
+        print(f'next sequence: {best}')
         seq_len = len(best)
-        print(seq_len)
-        curr_pos += seq_len
+        #print(seq_len)
 
         for layer in model.layers:
             layer.attention.cache_k[0, curr_pos:curr_pos+seq_len] = layer.attention.local_cache_k[best_i, :seq_len]
             layer.attention.cache_v[0, curr_pos:curr_pos+seq_len] = layer.attention.local_cache_v[best_i, :seq_len]
+        curr_pos += seq_len
     return best
 
 if __name__ == '__main__':
-    #print(pick_longest_match([1, 330, 365, 334], [[], [123], [384, 413, 401], [384, 413, 401, 420], [384, 401, 413]], sys.argv[1]))
-    #print(apply_tree([1, 330, 365, 334], [[384], [384, 333], [384, 413, 401], [384, 401, 413]], sys.argv[1]))
     apply_tree(sys.argv[1])
