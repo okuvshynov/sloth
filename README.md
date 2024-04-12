@@ -12,4 +12,5 @@ Relevant links.
 1. https://github.com/ml-explore/mlx-examples/tree/main/llms/mixtral
 2. https://github.com/FasterDecoding/Medusa?tab=readme-ov-file
 3. https://arxiv.org/pdf/2401.18079.pdf
+4. https://huggingface.co/Vezora/Mistral-22B-v0.1
 
