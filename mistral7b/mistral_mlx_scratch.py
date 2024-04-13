@@ -59,22 +59,38 @@ class Attention(nn.Module):
         queries = queries.reshape(B, L, self.n_heads, -1).transpose(0, 2, 1, 3)
         keys = keys.reshape(B, L, self.n_kv_heads, -1).transpose(0, 2, 1, 3)
         values = values.reshape(B, L, self.n_kv_heads, -1).transpose(0, 2, 1, 3)
+        
+        # we'll need that for populating incremental cache updates
+        new_values = values
+        offset = 0
 
         if cache is not None:
+            # here we read from shared cache which has B == 1
             key_cache, value_cache = cache
-            queries = self.rope(queries, offset=key_cache.shape[2])
-            keys = self.rope(keys, offset=key_cache.shape[2])
-            keys = mx.concatenate([key_cache, keys], axis=2)
-            values = mx.concatenate([value_cache, values], axis=2)
+            key_cache = mx.tile(key_cache, [B, 1, 1, 1])
+            value_cache = mx.tile(value_cache, [B, 1, 1, 1])
+            
+            offset = key_cache.shape[2]
+            queries = self.rope(queries, offset=offset)
+            new_keys = self.rope(keys, offset=offset)
+            keys = mx.concatenate([key_cache, new_keys], axis=2)
+            values = mx.concatenate([value_cache, new_values], axis=2)
         else:
             queries = self.rope(queries)
             keys = self.rope(keys)
+            new_keys = keys
+
+        ext_mask = mx.zeros((L, offset + L), dtype=mask.dtype)
+        ext_mask[:, -L:] = mask
 
         output = mx.fast.scaled_dot_product_attention(
-            queries, keys, values, scale=self.scale, mask=mask
+            queries, keys, values, scale=self.scale, mask=ext_mask
         )
         output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
-        return self.wo(output), (keys, values)
+
+        # This is important - we return and store only newly computed keys/values
+        # otherwise we'll spend too much memory (batch_size * entire_cache) 
+        return self.wo(output), (new_keys, new_values)
 
 
 class FeedForward(nn.Module):
@@ -140,11 +156,13 @@ class Mistral(nn.Module):
         if cache is None:
             cache = [None] * len(self.layers)
 
+        # no overwriting old cache. we'll merge after we know the max match
+        new_cache = [None] * len(self.layers)
+
         for e, layer in enumerate(self.layers):
-            h, cache[e] = layer(h, mask, cache[e])
+            h, new_cache[e] = layer(h, mask, cache[e])
 
-        return self.output(self.norm(h)), cache
-
+        return self.output(self.norm(h)), new_cache
 
 class Tokenizer:
     def __init__(self, model_path: str):
@@ -170,7 +188,6 @@ class Tokenizer:
             return " " + out
         return out
 
-
 def load_model(folder: str):
     model_path = Path(folder)
     tokenizer = Tokenizer(str(model_path / "tokenizer.model"))
@@ -189,23 +206,79 @@ def load_model(folder: str):
     mx.eval(model.parameters())
     return model, tokenizer
 
+def common_prefix_len(A, B):
+    res = 0
+    for a, b in zip(A, B):
+        if a != b:
+            break
+        res += 1
+    return res
 
-def generate(prompt: mx.array, model: Mistral, temp: Optional[float] = 0.0, dup=1):
-    def sample(logits):
-        if temp == 0:
-            return mx.argmax(logits, axis=-1)
-        else:
-            return mx.random.categorical(logits * (1 / temp))
+def apply_tree(model: Mistral):
+    prefix = [1, 330, 365, 334] # A B C
+    suffixes_m = [
+        [[384], [384, 333], [384, 413, 401], [384, 401, 413]],
+        [[420], [420, 444], [420, 382], [420, 315]],
+        [[315], [315, 315], [315, 375], [315, 375, 876]],
+        [[475, 524], [475], [475, 393]],
+    ]
 
-    x = mx.tile(prompt[None], [dup, 1])
+    generated = []
+    x = mx.array(prefix)[None]
+
+    # Cache is 6D: [layer, k|v, batch_index, head_index, position, data_index]
     logits, cache = model(x)
-    y = sample(logits[:, -1, :])
-    yield y
+    y = mx.argmax(logits[:, -1, :]).item()
+    print(f'after prefix :{y}')
+    generated.append(y)
 
-    while True:
-        logits, cache = model(y[:, None], cache)
-        y = sample(logits.squeeze(1))
-        yield y
+    pad = tokenizer.pad_id
+    for si, suffixes in enumerate(suffixes_m):
+        lengths = [len(s) for s in suffixes]
+        max_len = max(lengths)
+        x = mx.array([s + [pad] * (max_len - len(s)) for s in suffixes])
+        
+        # here we pass shared cache with batch dim = 1
+        # and get back partial cache for each new suffix in a batch
+        logits, local_cache = model(x, cache)
+
+        best = []
+        best_i = -1
+        for i, candidate in enumerate(suffixes):
+            l = len(candidate)
+            output = [mx.argmax(logits[i, j,:]).item() for j in range(len(candidate))]
+
+            # now we need to find the longest match between candidate and generated
+            # Our output is offset by one + we need to add one non-matching token
+            # For example, if the candidate was [A, B, C, D] the output would show 
+            # 'what was generated after' [A], [A, B], etc. In case of perfect prediction
+            # we should see something like [B, C, D, E] in the output. 
+            # We add 1 as it is also 'correct' symbol produced by main model. 
+
+            approved_len = common_prefix_len(output, candidate[1:]) + 1
+            if approved_len > len(best):
+                best = output[:approved_len]
+                best_i = i
+
+        print(f'next approved sequence: {best}')
+        generated.extend(best)
+
+        # Now we append the matched sequence to the global cache
+        if best_i >= 0:
+            new_len = len(best)
+
+            # for each layer update the cache
+            for i, (local_K, local_V) in enumerate(local_cache):
+                K, V = cache[i]
+                new_K = local_K[None, best_i, :, :new_len, :]
+                new_V = local_V[None, best_i, :, :new_len, :]
+
+                K = mx.concatenate([K, new_K], axis=2)
+                V = mx.concatenate([V, new_V], axis=2)
+
+                cache[i] = K, V
+        
+    print(tokenizer.decode(generated))
 
 
 if __name__ == "__main__":
@@ -217,36 +290,12 @@ if __name__ == "__main__":
         help="The path to the model weights and tokenizer",
     )
     parser.add_argument(
-        "--prompt",
-        help="The message to be processed by the model",
-        default="In the beginning the Universe was created.",
-    )
-    parser.add_argument(
-        "--max-tokens",
-        "-m",
-        type=int,
-        default=100,
-        help="Maximum number of tokens to generate",
-    )
-    parser.add_argument(
         "--temp",
         help="The sampling temperature.",
         type=float,
         default=0.0,
     )
-    parser.add_argument(
-        "--tokens-per-eval",
-        help="The batch size of tokens to generate.",
-        type=int,
-        default=10,
-    )
     parser.add_argument("--seed", type=int, default=0, help="The PRNG seed")
-    parser.add_argument(
-        "--dup",
-        help="Duplicates to simulate batches",
-        type=int,
-        default=1,
-    )
 
     args = parser.parse_args()
 
@@ -254,32 +303,4 @@ if __name__ == "__main__":
     print("[INFO] Loading model from disk.")
     model, tokenizer = load_model(args.model_path)
 
-    print("[INFO] Starting generation...")
-    tic = time.time()
-    print(args.prompt, end="", flush=True)
-    prompt = mx.array(tokenizer.encode(args.prompt))
-    tokens = []
-    for token, ntoks in zip(generate(prompt, model, args.temp, args.dup), range(args.max_tokens)):
-        tokens.append(token)
-        if ntoks == 0:
-            mx.eval(tokens)
-            toc = time.time()
-            prompt_tps = prompt.size / (toc - tic)
-            tic = time.time()
-
-        if (len(tokens) % args.tokens_per_eval) == 0:
-            mx.eval(tokens)
-            s = tokenizer.decode([t[0].item() for t in tokens])
-            print(s, end="", flush=True)
-            tokens = []
-
-    mx.eval(tokens)
-    s = tokenizer.decode([t.item() for t in tokens])
-    print(s, flush=True)
-    print("------")
-    generation_tps = ntoks / (time.time() - tic)
-    print(
-        f"Tokens per second: prompt {prompt_tps:.3f}, "
-        f"generation {generation_tps:.3f}, "
-        f"generation overall {generation_tps * args.dup:.3f}"
-    )
+    apply_tree(model)
