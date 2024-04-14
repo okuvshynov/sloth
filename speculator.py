@@ -19,7 +19,6 @@ class Speculator:
 
 class SpeculatorHTTPHandler(BaseHTTPRequestHandler):
     def __init__(self, speculator, *args, **kwargs):
-        print('SpeculatorHTTPHandler.__init__')
         self.speculator = speculator
         super().__init__(*args, **kwargs)
 
@@ -35,10 +34,8 @@ class SpeculatorHTTPHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(res).encode())
 
-    # TODO: this should be some health/stats
     def do_GET(self):
-        print('do get')
-        response_dict = {"message": self.speculator.speculate([1, 4222, 349, 264, 5565, 302, 28705])}
+        response_dict = {"status": "alive"}
         self.send_response(200)
         self.send_header('Content-type', 'application/json')
         self.end_headers()
