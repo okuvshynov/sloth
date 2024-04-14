@@ -13,6 +13,8 @@ import mlx.nn as nn
 from mlx.utils import tree_unflatten
 from sentencepiece import SentencePieceProcessor
 
+import fewlines.timer as ft
+import fewlines.dashboard as fd
 
 @dataclass
 class ModelArgs:
@@ -149,9 +151,9 @@ class Mistral(nn.Module):
         h = self.tok_embeddings(inputs)
 
         mask = None
-        if h.shape[1] > 1:
-            mask = nn.MultiHeadAttention.create_additive_causal_mask(h.shape[1])
-            mask = mask.astype(h.dtype)
+        #if h.shape[1] > 1:
+        mask = nn.MultiHeadAttention.create_additive_causal_mask(h.shape[1])
+        mask = mask.astype(h.dtype)
 
         if cache is None:
             cache = [None] * len(self.layers)
@@ -247,6 +249,8 @@ def apply_tree(model: Mistral):
         for i, candidate in enumerate(suffixes):
             l = len(candidate)
             output = [mx.argmax(logits[i, j,:]).item() for j in range(len(candidate))]
+            
+            # TODO: are we computing 1 extra char here?
 
             # now we need to find the longest match between candidate and generated
             # Our output is offset by one + we need to add one non-matching token
@@ -280,6 +284,119 @@ def apply_tree(model: Mistral):
         
     print(tokenizer.decode(generated))
 
+def speculative_loop(model: Mistral, tokenizer: Tokenizer, prefix, next_suffixes_fn):
+    generated = []
+    x = mx.array(prefix)[None]
+
+    # Cache is 6D: [layer, k|v, batch_index, head_index, position, data_index]
+    logits, cache = model(x)
+    y = mx.argmax(logits[:, -1, :]).item()
+    print(f'after prefix :{y}')
+    generated.append(y)
+
+    pad = tokenizer.pad_id
+
+    started = time.time()
+    while True:
+        with ft.Timer("next_suffixes_fn_latency") as _:
+            suffixes = next_suffixes_fn(prefix + generated)
+        if len(suffixes) == 0:
+            break
+        lengths = [len(s) for s in suffixes]
+        max_len = max(lengths)
+        x = mx.array([s + [pad] * (max_len - len(s)) for s in suffixes])
+        
+        # here we pass shared cache with batch dim = 1
+        # and get back partial cache for each new suffix in a batch
+        with ft.Timer("model_eval_latency") as _:
+            logits, local_cache = model(x, cache)
+
+        best = []
+        best_i = -1
+        for i, candidate in enumerate(suffixes):
+            output = [mx.argmax(logits[i, j,:]).item() for j in range(len(candidate))]
+            
+            # TODO: are we computing 1 extra char here?
+
+            # now we need to find the longest match between candidate and generated
+            # Our output is offset by one + we need to add one non-matching token
+            # For example, if the candidate was [A, B, C, D] the output would show 
+            # 'what was generated after' [A], [A, B], etc. In case of perfect prediction
+            # we should see something like [B, C, D, E] in the output. 
+            # We add 1 as it is also 'correct' symbol produced by main model. 
+
+            approved_len = common_prefix_len(output, candidate[1:]) + 1
+            if approved_len > len(best):
+                best = output[:approved_len]
+                best_i = i
+
+        print(f'next approved sequence: {best}')
+        generated.extend(best)
+
+        # Now we append the matched sequence to the global cache
+        if best_i >= 0:
+            with ft.Timer("cache_update_latency") as _:
+                new_len = len(best)
+
+                # for each layer update the cache
+                for i, (local_K, local_V) in enumerate(local_cache):
+                    K, V = cache[i]
+                    new_K = local_K[None, best_i, :, :new_len, :]
+                    new_V = local_V[None, best_i, :, :new_len, :]
+
+                    K = mx.concatenate([K, new_K], axis=2)
+                    V = mx.concatenate([V, new_V], axis=2)
+
+                    cache[i] = K, V
+        
+    print(tokenizer.decode(generated))
+    print(f"TPS: {len(generated) / (time.time() - started)}")
+    for l in fd.dashboard({"charts" : [[("*latency", 'histogram')]], 'color': 'green', 'n_lines': 3}):
+        print(l)
+
+
+def test_correctness():
+    prompt = [1, 4222, 349, 264, 5565, 302, 28705]
+
+    # for mistral7b@q4
+    expected = [28750, 28740, 303, 5445, 28723, 661, 349, 264, 2990, 302, 4638, 472, 28725, 5514, 28725, 304, 16863, 28723, 661, 349, 264, 2990, 302, 272, 3437, 28723, 13, 13, 20491, 349, 264, 2990, 302, 272, 2609, 28723, 661, 349, 264, 2990, 302, 3340, 28725, 9097, 28725, 304, 5679, 28723, 661, 349, 264, 2990, 302, 272, 2609, 28723, 13, 13, 20491, 349, 264, 2990, 302, 272, 2169, 28723, 661, 349, 264, 2990, 302, 272, 2169, 28723, 13, 13, 20491, 349, 264, 2990, 302, 272, 3437, 28723, 661, 349, 264, 2990, 302, 272, 3437, 28723, 13, 13, 20491, 349, 264, 2990, 302, 272]
+
+    complete = prompt + expected
+
+    def mock_speculate(curr):
+        curr = curr[:-1]
+        seq_len = len(curr)
+
+        assert curr == complete[:seq_len]
+
+        next_tokens = complete[seq_len:]
+
+        if len(next_tokens) == 0:
+            return []
+
+        # now we need to randomly pick some tokens which would/would not match
+        p_correct = 0.95
+        p_stop = 0.01
+        res = []
+
+        samples = mx.random.randint(low=1, high=2).item()
+
+        # how many candidates do we produce?
+        for _ in range(samples):
+            speculation = []
+            for i, tok in enumerate(next_tokens):
+                speculation.append(tok if mx.random.uniform() < p_correct or i == 0 else tok + 1)
+                if mx.random.uniform() < p_stop:
+                    break
+
+        res.append(speculation)
+
+        return res
+
+    model, tokenizer = load_model(args.model_path)
+
+    speculative_loop(model, tokenizer, prompt, mock_speculate)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Mistral inference script")
@@ -300,6 +417,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     mx.random.seed(args.seed)
+
+    test_correctness()
+
     print("[INFO] Loading model from disk.")
     model, tokenizer = load_model(args.model_path)
 

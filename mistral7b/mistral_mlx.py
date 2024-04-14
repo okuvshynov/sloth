@@ -190,14 +190,14 @@ def load_model(folder: str):
     return model, tokenizer
 
 
-def generate(prompt: mx.array, model: Mistral, temp: Optional[float] = 0.0, dup=1):
+def generate(prompt: mx.array, model: Mistral, temp: Optional[float] = 0.0):
     def sample(logits):
         if temp == 0:
             return mx.argmax(logits, axis=-1)
         else:
             return mx.random.categorical(logits * (1 / temp))
 
-    x = mx.tile(prompt[None], [dup, 1])
+    x = prompt[None]
     logits, cache = model(x)
     y = sample(logits[:, -1, :])
     yield y
@@ -241,12 +241,6 @@ if __name__ == "__main__":
         default=10,
     )
     parser.add_argument("--seed", type=int, default=0, help="The PRNG seed")
-    parser.add_argument(
-        "--dup",
-        help="Duplicates to simulate batches",
-        type=int,
-        default=1,
-    )
 
     args = parser.parse_args()
 
@@ -258,9 +252,13 @@ if __name__ == "__main__":
     tic = time.time()
     print(args.prompt, end="", flush=True)
     prompt = mx.array(tokenizer.encode(args.prompt))
+    #print(prompt.tolist())
+
+    expected = []
     tokens = []
-    for token, ntoks in zip(generate(prompt, model, args.temp, args.dup), range(args.max_tokens)):
+    for token, ntoks in zip(generate(prompt, model, args.temp), range(args.max_tokens)):
         tokens.append(token)
+        expected.append(token[0].item())
         if ntoks == 0:
             mx.eval(tokens)
             toc = time.time()
@@ -281,5 +279,7 @@ if __name__ == "__main__":
     print(
         f"Tokens per second: prompt {prompt_tps:.3f}, "
         f"generation {generation_tps:.3f}, "
-        f"generation overall {generation_tps * args.dup:.3f}"
     )
+
+    print(prompt.tolist())
+    print(expected)
