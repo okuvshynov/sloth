@@ -5,6 +5,9 @@ import sys
 from mistral7b.mistral_mlx_scratch import load_model
 import mlx.core as mx
 
+import fewlines.timer as ft
+import fewlines.dashboard as fd
+
 class Speculator:
     def __init__(self, model_path):
         # here we'll initialize model and current search tree
@@ -28,19 +31,20 @@ class SpeculatorHTTPHandler(BaseHTTPRequestHandler):
         req = json.loads(post_data.decode('utf-8'))
         res = {}
         if 'prompt' in req:
-            res = {"next_tokens": self.speculator.speculate(req['prompt'])}
+            with ft.Timer('model_latency') as _:
+                res = {"next_tokens": self.speculator.speculate(req['prompt'])}
         self.send_response(200)
         self.send_header('Content-type', 'application/json')
         self.end_headers()
         self.wfile.write(json.dumps(res).encode())
 
     def do_GET(self):
-        response_dict = {"status": "alive"}
-        self.send_response(200)
-        self.send_header('Content-type', 'application/json')
-        self.end_headers()
-        self.wfile.write(json.dumps(response_dict).encode())
+        #response_dict = {"status": "alive", 'stats': fd.histograms('*latency*')}
 
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain; charset=utf-8')
+        self.end_headers()
+        self.wfile.writelines(f'{l}\n'.encode() for l in fd.histograms('*latency*'))
 
 class SpeculatorHTTPServer(HTTPServer):
     def __init__(self, server_address, RequestHandlerClass, speculator):
