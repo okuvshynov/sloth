@@ -56,7 +56,7 @@ class Speculator:
         if self.session_id is None or self.session_id != request['session_id']:
             # starting new session
             self.session_id = request['session_id']
-            logging.info(self.session_id)
+            logging.info(f"starting session {self.session_id}")
             self.tokens = request['tokens'][:]
             self.cache = [None for _ in self.model.layers]
             self.cache_len = 0
@@ -94,7 +94,7 @@ class Speculator:
         
         # need to find the input. It is a difference between populated to cache and current tokens
         tokens_to_process = self.tokens[self.cache_len:]
-        logging.info("tokens to process: ", tokens_to_process)
+        logging.info(f"tokens to process: {tokens_to_process}")
 
         x = mx.array(tokens_to_process)[None]
         logits, local_cache = self.model(x, self.cache)
@@ -136,7 +136,7 @@ class SpeculatorHTTPHandler(BaseHTTPRequestHandler):
             # TODO: we send back one of the tokens from input. Need to fix that
             
             new_tokens = self.speculator.tokens[len(req['tokens']) - 1:]
-            logging.info('generated tokens: ', self.speculator.tokens, new_tokens)
+            logging.info(f'generated tokens: {self.speculator.tokens, new_tokens}')
             res['tokens'] = new_tokens
 
         # TODO: send NOT success if request is not well-formed

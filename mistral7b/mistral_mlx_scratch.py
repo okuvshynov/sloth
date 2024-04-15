@@ -283,7 +283,7 @@ def apply_tree(model: Mistral):
 
                 cache[i] = K, V
         
-    logging.info(tokenizer.decode(generated))
+    logging.info(f"ALL GENERATED: {tokenizer.decode(generated)}")
 
 def speculative_loop(model: Mistral, tokenizer: Tokenizer, prefix, next_suffixes_fn, max_tokens=256):
     generated = []
