@@ -284,7 +284,7 @@ def apply_tree(model: Mistral):
         
     print(tokenizer.decode(generated))
 
-def speculative_loop(model: Mistral, tokenizer: Tokenizer, prefix, next_suffixes_fn):
+def speculative_loop(model: Mistral, tokenizer: Tokenizer, prefix, next_suffixes_fn, max_tokens=256):
     generated = []
     x = mx.array(prefix)[None]
 
@@ -332,6 +332,9 @@ def speculative_loop(model: Mistral, tokenizer: Tokenizer, prefix, next_suffixes
 
         print(f'next approved sequence: {best}')
         generated.extend(best)
+
+        if len(generated) >= max_tokens:
+            break
 
         # Now we append the matched sequence to the global cache
         if best_i >= 0:
