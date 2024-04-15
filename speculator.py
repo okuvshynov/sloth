@@ -1,6 +1,7 @@
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import logging
+import time
 
 import argparse
 
@@ -10,6 +11,9 @@ import mlx.core as mx
 import fewlines.timer as ft
 import fewlines.dashboard as fd
 import fewlines.metrics as fm
+
+import threading
+import queue
 
 default_max_tokens = 256
 default_min_tokens = 8
@@ -92,7 +96,10 @@ class Speculator:
         if self.session_id is None:
             return
         
+        logging.info(f"current thread: {threading.get_native_id()}")
+        
         # need to find the input. It is a difference between populated to cache and current tokens
+        logging.info(f"tokens = {self.tokens}, cache_len = {self.cache_len}")
         tokens_to_process = self.tokens[self.cache_len:]
         logging.info(f"tokens to process: {tokens_to_process}")
 
@@ -112,11 +119,53 @@ class Speculator:
                 self.cache[i] = K, V
             else:
                 self.cache[i] = local_K, local_V
+
         self.cache_len += len(tokens_to_process)
+        logging.info(f"cache len = {self.cache_len}")
+
+class AsyncSpeculator:
+    def __init__(self, speculator):
+        self.speculator: Speculator = speculator
+        self.queue = queue.Queue()
+        self.new_tokens = None
+        self.debounce_lock = threading.Lock()
+        self.gen_since_last = 0
+        threading.Thread(target=self.gen_loop, daemon=True).start()
+
+    def query(self, request):
+        with self.debounce_lock:
+            self.queue.put(request)
+            self.queue.join()
+            result = self.new_tokens
+            self.new_tokens = None
+            return result
+
+    def gen_loop(self):
+        while True:
+            try:
+                req = self.queue.get(timeout=1e-4)
+            except:
+                req = None
+
+            if req is not None:
+                logging.info(f'working on {req}')
+                self.speculator.handle_query(req)
+                while len(self.speculator.tokens) < len(req['tokens']) + 8:
+                    self.speculator.gen_next() 
+                self.new_tokens = self.speculator.tokens[len(req['tokens']) - 1:]
+                logging.info(f'generated tokens: {self.speculator.tokens, self.new_tokens}')
+                self.gen_since_last = 0
+                self.queue.task_done()
+            else:
+                if self.gen_since_last < 16:
+                    self.speculator.gen_next()
+                    self.gen_since_last += 1
+                else:
+                    time.sleep(0.1)
 
 class SpeculatorHTTPHandler(BaseHTTPRequestHandler):
     def __init__(self, speculator, *args, **kwargs):
-        self.speculator: Speculator = speculator
+        self.async_speculator = speculator
         super().__init__(*args, **kwargs)
 
     def do_POST(self):
@@ -127,17 +176,11 @@ class SpeculatorHTTPHandler(BaseHTTPRequestHandler):
         if 'tokens' not in req or 'session_id' not in req or len(req['tokens']) == 0:
             logging.warn('requests must contain non-empty prompt and session_id') 
         else:
-            with ft.Timer('handle_query_latency') as _:
-                self.speculator.handle_query(req)
-            for i in range(8):
-                with ft.Timer('gen_next_latency') as _:
-                    self.speculator.gen_next()
-
             # TODO: we send back one of the tokens from input. Need to fix that
-            
-            new_tokens = self.speculator.tokens[len(req['tokens']) - 1:]
-            logging.info(f'generated tokens: {self.speculator.tokens, new_tokens}')
+            new_tokens = self.async_speculator.query(req)
             res['tokens'] = new_tokens
+            logging.info(f'returning {res}')
+
 
         # TODO: send NOT success if request is not well-formed
         self.send_response(200)
@@ -156,11 +199,12 @@ class SpeculatorHTTPHandler(BaseHTTPRequestHandler):
 class SpeculatorHTTPServer(HTTPServer):
     def __init__(self, server_address, RequestHandlerClass, speculator):
         self.speculator = speculator
+        self.async_speculator = AsyncSpeculator(self.speculator)
         super().__init__(server_address, RequestHandlerClass)
     
     def finish_request(self, request, client_address):
         # Pass db_connection to the handler
-        self.RequestHandlerClass(self.speculator, request, client_address, self)
+        self.RequestHandlerClass(self.async_speculator, request, client_address, self)
 
 
 if __name__ == '__main__':
