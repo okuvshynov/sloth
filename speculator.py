@@ -89,22 +89,17 @@ class Speculator:
                 # TODO: can this be off by 1?
                 # we can keep the cache up to match_len. 
                 # Or should it be match len - 1? no, we'll compute the same thing again anyway
-                logging.info(f'updating cache len from {self.cache_len} to {match_len}')
                 self.cache_len = match_len
                 
     def gen_next(self):
         if self.session_id is None:
             return
-        
-        logging.info(f"current thread: {threading.get_native_id()}")
-        
         # need to find the input. It is a difference between populated to cache and current tokens
-        logging.info(f"tokens = {self.tokens}, cache_len = {self.cache_len}")
         tokens_to_process = self.tokens[self.cache_len:]
-        logging.info(f"tokens to process: {tokens_to_process}")
 
         x = mx.array(tokens_to_process)[None]
-        logits, local_cache = self.model(x, self.cache)
+        with ft.Timer("model_eval_latency") as _:
+            logits, local_cache = self.model(x, self.cache)
         y = mx.argmax(logits[:, -1, :]).item()
         self.tokens.append(y)
 
@@ -121,7 +116,6 @@ class Speculator:
                 self.cache[i] = local_K, local_V
 
         self.cache_len += len(tokens_to_process)
-        logging.info(f"cache len = {self.cache_len}")
 
 class AsyncSpeculator:
     def __init__(self, speculator):
@@ -181,7 +175,6 @@ class SpeculatorHTTPHandler(BaseHTTPRequestHandler):
             res['tokens'] = new_tokens
             logging.info(f'returning {res}')
 
-
         # TODO: send NOT success if request is not well-formed
         self.send_response(200)
         self.send_header('Content-type', 'application/json')
@@ -193,7 +186,7 @@ class SpeculatorHTTPHandler(BaseHTTPRequestHandler):
         self.send_header('Content-type', 'text/plain; charset=utf-8')
         self.end_headers()
         self.wfile.writelines(f'{l}\n'.encode() for l in fd.histograms('*latency*'))
-        self.wfile.writelines(f'Tokens to process: {l}\n'.encode() for l in fm.histogram("tokens_to_process"))
+        self.wfile.writelines(f'{l}\n'.encode() for l in fm.histogram("tokens_to_process"))
 
 
 class SpeculatorHTTPServer(HTTPServer):
