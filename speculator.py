@@ -14,6 +14,8 @@ class Speculator:
         print(f"loading model from {model_path}")
         self.model, self.tokenizer = load_model(model_path)
 
+    # TODO this should actually speculate and produce multiple tokens
+    # Let's start with just keeping producing linearly
     def speculate(self, prompt):
         x = mx.array(prompt)[None]
         logits, cache = self.model(x)
@@ -39,8 +41,6 @@ class SpeculatorHTTPHandler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(res).encode())
 
     def do_GET(self):
-        #response_dict = {"status": "alive", 'stats': fd.histograms('*latency*')}
-
         self.send_response(200)
         self.send_header('Content-type', 'text/plain; charset=utf-8')
         self.end_headers()
