@@ -3,11 +3,14 @@ import json
 import sys
 import logging
 
+import argparse
+
 from mistral7b.mistral_mlx_scratch import load_model
 import mlx.core as mx
 
 import fewlines.timer as ft
 import fewlines.dashboard as fd
+import fewlines.metrics as fm
 
 default_max_tokens = 256
 default_min_tokens = 8
@@ -55,6 +58,7 @@ class Speculator:
         if self.session_id is None or self.session_id != request['session_id']:
             # starting new session
             self.session_id = request['session_id']
+            print(self.session_id)
             self.tokens = request['tokens'][:]
             self.cache = [None for _ in self.model.layers]
             self.cache_len = 0
@@ -69,7 +73,7 @@ class Speculator:
             # even what we have generated after the new prompt. Otherwise:
 
             if match_len < len(new_tokens):
-                # we can keep the cache up to match_len
+
                 # and the generated tokens we need to update to all the passed tokens
                 self.tokens = new_tokens
 
@@ -77,15 +81,23 @@ class Speculator:
                     # either all caches are empty, or all are not
                     if self.cache[i] is None:
                         break
-                    self.cache[i][0] = self.cache[i][0][:, :, :match_len, :]
-                    self.cache[i][1] = self.cache[i][1][:, :, :match_len, :]
+                    K = self.cache[i][0][:, :, :match_len, :]
+                    V = self.cache[i][1][:, :, :match_len, :]
+                    self.cache[i] = K, V
+                # TODO: can this be off by 1?
+                # we can keep the cache up to match_len. 
+                # Or should it be match len - 1? no, we'll compute the same thing again anyway
+                print(f'updating cache len from {self.cache_len} to {match_len}')
+                self.cache_len = match_len
                 
     def gen_next(self):
+        print(self.session_id)
         if self.session_id is None:
             return
         
         # need to find the input. It is a difference between populated to cache and current tokens
         tokens_to_process = self.tokens[self.cache_len:]
+        print("tokens to process: ", tokens_to_process)
 
         x = mx.array(tokens_to_process)[None]
         logits, local_cache = self.model(x, self.cache)
@@ -105,14 +117,6 @@ class Speculator:
                 self.cache[i] = local_K, local_V
         self.cache_len += len(tokens_to_process)
 
-    # TODO this should actually speculate and produce multiple tokens
-    # Let's start with just keeping producing linearly
-    def speculate(self, prompt):
-        x = mx.array(prompt)[None]
-        logits, cache = self.model(x)
-        y = [mx.argmax(logits[:, -1, :]).item()]
-        return y
-
 class SpeculatorHTTPHandler(BaseHTTPRequestHandler):
     def __init__(self, speculator, *args, **kwargs):
         self.speculator: Speculator = speculator
@@ -127,9 +131,11 @@ class SpeculatorHTTPHandler(BaseHTTPRequestHandler):
         if 'tokens' not in req or 'session_id' not in req or len(req['tokens']) == 0:
             logging.warn('requests must contain non-empty prompt and session_id') 
         else:
-            self.speculator.handle_query(req)
+            with ft.Timer('handle_query_latency') as _:
+                self.speculator.handle_query(req)
             for i in range(8):
-                self.speculator.gen_next()
+                with ft.Timer('gen_next_latency') as _:
+                    self.speculator.gen_next()
 
             # TODO: we send back one of the tokens from input. Need to fix that
             
@@ -148,6 +154,8 @@ class SpeculatorHTTPHandler(BaseHTTPRequestHandler):
         self.send_header('Content-type', 'text/plain; charset=utf-8')
         self.end_headers()
         self.wfile.writelines(f'{l}\n'.encode() for l in fd.histograms('*latency*'))
+        self.wfile.writelines(f'Tokens to process: {l}\n'.encode() for l in fm.histogram("tokens_to_process"))
+
 
 class SpeculatorHTTPServer(HTTPServer):
     def __init__(self, server_address, RequestHandlerClass, speculator):
@@ -160,13 +168,30 @@ class SpeculatorHTTPServer(HTTPServer):
 
 
 if __name__ == '__main__':
-    addr = 'localhost'
-    port = 8808
-    spec = Speculator(sys.argv[1])
+    parser = argparse.ArgumentParser(description="speculation service")
+    parser.add_argument(
+        "--addr",
+        type=str,
+        default="0.0.0.0",
+        help="Address where to start http server.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8808,
+        help="Port where to start http server",
+    )
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default="mlx_model",
+        help="The path to the model weights and tokenizer",
+    )
+    args = parser.parse_args()
 
-    server_address = (addr, port)
+    speculator = Speculator(args.model_path)
     
-    httpd = SpeculatorHTTPServer(server_address, SpeculatorHTTPHandler, spec)
-    print(f"Speculator server started on http://{addr}:{port}")
+    httpd = SpeculatorHTTPServer((args.addr, args.port), SpeculatorHTTPHandler, speculator)
+    print(f"Speculator server started on http://{args.addr}:{args.port}")
     httpd.serve_forever()        
 
