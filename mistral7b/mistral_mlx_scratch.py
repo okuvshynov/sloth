@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
+import logging
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -231,7 +232,7 @@ def apply_tree(model: Mistral):
     # Cache is 6D: [layer, k|v, batch_index, head_index, position, data_index]
     logits, cache = model(x)
     y = mx.argmax(logits[:, -1, :]).item()
-    print(f'after prefix :{y}')
+    logging.info(f'after prefix :{y}')
     generated.append(y)
 
     pad = tokenizer.pad_id
@@ -264,7 +265,7 @@ def apply_tree(model: Mistral):
                 best = output[:approved_len]
                 best_i = i
 
-        print(f'next approved sequence: {best}')
+        logging.info(f'next approved sequence: {best}')
         generated.extend(best)
 
         # Now we append the matched sequence to the global cache
@@ -282,7 +283,7 @@ def apply_tree(model: Mistral):
 
                 cache[i] = K, V
         
-    print(tokenizer.decode(generated))
+    logging.info(tokenizer.decode(generated))
 
 def speculative_loop(model: Mistral, tokenizer: Tokenizer, prefix, next_suffixes_fn, max_tokens=256):
     generated = []
@@ -291,7 +292,7 @@ def speculative_loop(model: Mistral, tokenizer: Tokenizer, prefix, next_suffixes
     # Cache is 6D: [layer, k|v, batch_index, head_index, position, data_index]
     logits, cache = model(x)
     y = mx.argmax(logits[:, -1, :]).item()
-    print(f'after prefix :{y}')
+    logging.info(f'after prefix :{y}')
     generated.append(y)
 
     pad = tokenizer.pad_id
@@ -330,7 +331,7 @@ def speculative_loop(model: Mistral, tokenizer: Tokenizer, prefix, next_suffixes
                 best = output[:approved_len]
                 best_i = i
 
-        print(f'next approved sequence: {best}')
+        logging.info(f'next approved sequence: {best}')
         generated.extend(best)
 
         if len(generated) >= max_tokens:
@@ -352,10 +353,10 @@ def speculative_loop(model: Mistral, tokenizer: Tokenizer, prefix, next_suffixes
 
                     cache[i] = K, V
         
-    print(tokenizer.decode(generated))
-    print(f"TPS: {len(generated) / (time.time() - started)}")
+    logging.info(tokenizer.decode(generated))
+    logging.info(f"TPS: {len(generated) / (time.time() - started)}")
     for l in fd.dashboard({"charts" : [[("*latency", 'histogram')]], 'color': 'green', 'n_lines': 3}):
-        print(l)
+        logging.info(l)
 
 
 def test_correctness():
@@ -405,6 +406,7 @@ def test_correctness():
 
 
 if __name__ == "__main__":
+    logging.basicConfig(format='%(asctime)s %(message)s', level=logging.INFO)
     parser = argparse.ArgumentParser(description="Mistral inference script")
     parser.add_argument(
         "--model-path",
@@ -426,7 +428,7 @@ if __name__ == "__main__":
 
     test_correctness()
 
-    print("[INFO] Loading model from disk.")
+    logging.info("[INFO] Loading model from disk.")
     model, tokenizer = load_model(args.model_path)
 
     apply_tree(model)

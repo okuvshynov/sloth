@@ -1,6 +1,5 @@
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
-import sys
 import logging
 
 import argparse
@@ -15,24 +14,23 @@ import fewlines.metrics as fm
 default_max_tokens = 256
 default_min_tokens = 8
 
-# let's make this one non-thread safe
-# it would perform just two operations:
-#  - update current (based on new input)
-#  - perform exploration step
-# all concurrency between background exploration and new inputs from the client 
-# would be handled externally
-
-
 def _longest_prefix(a, b):
     for i, (ca, cb) in enumerate(zip(a, b)):
         if ca != cb:
             return i
     return min(len(a), len(b))
 
+# this one is non-thread safe
+# it would perform just two operations:
+#  - update current (based on new input)
+#  - perform exploration step
+# all concurrency between background exploration and new inputs from the client 
+# would be handled externally
+
 class Speculator:
     def __init__(self, model_path):
         # here we'll initialize model and current search tree
-        print(f"loading model from {model_path}")
+        logging.info(f"loading model from {model_path}")
         self.model, self.tokenizer = load_model(model_path)
         self.session_id = None
 
@@ -58,7 +56,7 @@ class Speculator:
         if self.session_id is None or self.session_id != request['session_id']:
             # starting new session
             self.session_id = request['session_id']
-            print(self.session_id)
+            logging.info(self.session_id)
             self.tokens = request['tokens'][:]
             self.cache = [None for _ in self.model.layers]
             self.cache_len = 0
@@ -87,17 +85,16 @@ class Speculator:
                 # TODO: can this be off by 1?
                 # we can keep the cache up to match_len. 
                 # Or should it be match len - 1? no, we'll compute the same thing again anyway
-                print(f'updating cache len from {self.cache_len} to {match_len}')
+                logging.info(f'updating cache len from {self.cache_len} to {match_len}')
                 self.cache_len = match_len
                 
     def gen_next(self):
-        print(self.session_id)
         if self.session_id is None:
             return
         
         # need to find the input. It is a difference between populated to cache and current tokens
         tokens_to_process = self.tokens[self.cache_len:]
-        print("tokens to process: ", tokens_to_process)
+        logging.info("tokens to process: ", tokens_to_process)
 
         x = mx.array(tokens_to_process)[None]
         logits, local_cache = self.model(x, self.cache)
@@ -123,7 +120,6 @@ class SpeculatorHTTPHandler(BaseHTTPRequestHandler):
         super().__init__(*args, **kwargs)
 
     def do_POST(self):
-
         content_length = int(self.headers['Content-Length'])
         post_data = self.rfile.read(content_length)
         req = json.loads(post_data.decode('utf-8'))
@@ -140,7 +136,7 @@ class SpeculatorHTTPHandler(BaseHTTPRequestHandler):
             # TODO: we send back one of the tokens from input. Need to fix that
             
             new_tokens = self.speculator.tokens[len(req['tokens']) - 1:]
-            print('generated tokens: ', self.speculator.tokens, new_tokens)
+            logging.info('generated tokens: ', self.speculator.tokens, new_tokens)
             res['tokens'] = new_tokens
 
         # TODO: send NOT success if request is not well-formed
@@ -168,6 +164,7 @@ class SpeculatorHTTPServer(HTTPServer):
 
 
 if __name__ == '__main__':
+    logging.basicConfig(format='%(asctime)s %(message)s', level=logging.INFO)
     parser = argparse.ArgumentParser(description="speculation service")
     parser.add_argument(
         "--addr",
@@ -192,6 +189,6 @@ if __name__ == '__main__':
     speculator = Speculator(args.model_path)
     
     httpd = SpeculatorHTTPServer((args.addr, args.port), SpeculatorHTTPHandler, speculator)
-    print(f"Speculator server started on http://{args.addr}:{args.port}")
-    httpd.serve_forever()        
+    logging.info(f"Speculator server started on http://{args.addr}:{args.port}")
+    httpd.serve_forever()
 

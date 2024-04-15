@@ -1,10 +1,13 @@
-# let's test access to speculator first
-
 import requests
 import argparse
 import random
+import logging
 
 from mistral7b.mistral_mlx_scratch import load_model, speculative_loop
+
+# pretends to just predict last token
+def mock_speculation(curr):
+    return [[curr[-1]]]
 
 class SpeculatorClient:
     def __init__(self, addr, port):
@@ -22,7 +25,6 @@ class SpeculatorClient:
         response = self.session.post(self.url, json=data)
         received_data = response.json()
         
-        print('Response from server:', received_data)
         return [received_data['tokens']]
 
 # TODO: this should be also a service, which connects to the speculator
@@ -59,10 +61,14 @@ def generate():
     model, tokenizer = load_model(args.model_path)
 
     client = SpeculatorClient(args.speculator_addr, args.speculator_port)
+    
+    # London is a capital of
     prompt = [1, 4222, 349, 264, 5565, 302, 28705]
 
     speculative_loop(model, tokenizer, prompt, client.send_request, max_tokens=64)
+    #speculative_loop(model, tokenizer, prompt, mock_speculation, max_tokens=64)
 
 
 if __name__ == '__main__':
+    logging.basicConfig(format='%(asctime)s %(message)s', level=logging.INFO)
     generate()
