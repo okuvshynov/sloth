@@ -1,14 +1,8 @@
 # Copyright © 2023 Apple Inc.
-# Copyright © 2024 Oleksandr Kuvshynov
-# MIT Licence
 
-# This is a modified version of https://github.com/ml-explore/mlx-examples/tree/main/llms/mistral by Apple (MIT License)
-# Mofification is in the cache handling: 
-# We do have kv-cache but just for batch size of one. 
-# During inference we receive extra local cache per batch element and assume the one cache is for shared prefix.
-
-
+import argparse
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -17,6 +11,7 @@ import mlx.core as mx
 import mlx.nn as nn
 from mlx.utils import tree_unflatten
 from sentencepiece import SentencePieceProcessor
+
 
 @dataclass
 class ModelArgs:
@@ -63,38 +58,22 @@ class Attention(nn.Module):
         queries = queries.reshape(B, L, self.n_heads, -1).transpose(0, 2, 1, 3)
         keys = keys.reshape(B, L, self.n_kv_heads, -1).transpose(0, 2, 1, 3)
         values = values.reshape(B, L, self.n_kv_heads, -1).transpose(0, 2, 1, 3)
-        
-        # we'll need that for populating incremental cache updates
-        new_values = values
-        offset = 0
 
         if cache is not None:
-            # here we read from shared cache which has B == 1
             key_cache, value_cache = cache
-            key_cache = mx.tile(key_cache, [B, 1, 1, 1])
-            value_cache = mx.tile(value_cache, [B, 1, 1, 1])
-            
-            offset = key_cache.shape[2]
-            queries = self.rope(queries, offset=offset)
-            new_keys = self.rope(keys, offset=offset)
-            keys = mx.concatenate([key_cache, new_keys], axis=2)
-            values = mx.concatenate([value_cache, new_values], axis=2)
+            queries = self.rope(queries, offset=key_cache.shape[2])
+            keys = self.rope(keys, offset=key_cache.shape[2])
+            keys = mx.concatenate([key_cache, keys], axis=2)
+            values = mx.concatenate([value_cache, values], axis=2)
         else:
             queries = self.rope(queries)
             keys = self.rope(keys)
-            new_keys = keys
-
-        ext_mask = mx.zeros((L, offset + L), dtype=mask.dtype)
-        ext_mask[:, -L:] = mask
 
         output = mx.fast.scaled_dot_product_attention(
-            queries, keys, values, scale=self.scale, mask=ext_mask
+            queries, keys, values, scale=self.scale, mask=mask
         )
         output = output.transpose(0, 2, 1, 3).reshape(B, L, -1)
-
-        # This is important - we return and store only newly computed keys/values
-        # otherwise we'll spend too much memory (batch_size * entire_cache) 
-        return self.wo(output), (new_keys, new_values)
+        return self.wo(output), (keys, values)
 
 
 class FeedForward(nn.Module):
@@ -153,20 +132,18 @@ class Mistral(nn.Module):
         h = self.tok_embeddings(inputs)
 
         mask = None
-        #if h.shape[1] > 1:
-        mask = nn.MultiHeadAttention.create_additive_causal_mask(h.shape[1])
-        mask = mask.astype(h.dtype)
+        if h.shape[1] > 1:
+            mask = nn.MultiHeadAttention.create_additive_causal_mask(h.shape[1])
+            mask = mask.astype(h.dtype)
 
         if cache is None:
             cache = [None] * len(self.layers)
 
-        # no overwriting old cache. we'll merge after we know the max match
-        new_cache = [None] * len(self.layers)
-
         for e, layer in enumerate(self.layers):
-            h, new_cache[e] = layer(h, mask, cache[e])
+            h, cache[e] = layer(h, mask, cache[e])
 
-        return self.output(self.norm(h)), new_cache
+        return self.output(self.norm(h)), cache
+
 
 class Tokenizer:
     def __init__(self, model_path: str):
@@ -192,6 +169,7 @@ class Tokenizer:
             return " " + out
         return out
 
+
 def load_model(folder: str):
     model_path = Path(folder)
     tokenizer = Tokenizer(str(model_path / "tokenizer.model"))
@@ -210,3 +188,89 @@ def load_model(folder: str):
     mx.eval(model.parameters())
     return model, tokenizer
 
+
+def generate(prompt: mx.array, model: Mistral, temp: Optional[float] = 0.0):
+    def sample(logits):
+        if temp == 0:
+            return mx.argmax(logits, axis=-1)
+        else:
+            return mx.random.categorical(logits * (1 / temp))
+
+    logits, cache = model(prompt[None])
+    y = sample(logits[:, -1, :])
+    yield y
+
+    while True:
+        logits, cache = model(y[:, None], cache)
+        y = sample(logits.squeeze(1))
+        yield y
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Mistral inference script")
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default="mlx_model",
+        help="The path to the model weights and tokenizer",
+    )
+    parser.add_argument(
+        "--prompt",
+        help="The message to be processed by the model",
+        default="In the beginning the Universe was created.",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        "-m",
+        type=int,
+        default=100,
+        help="Maximum number of tokens to generate",
+    )
+    parser.add_argument(
+        "--temp",
+        help="The sampling temperature.",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--tokens-per-eval",
+        help="The batch size of tokens to generate.",
+        type=int,
+        default=10,
+    )
+    parser.add_argument("--seed", type=int, default=0, help="The PRNG seed")
+
+    args = parser.parse_args()
+
+    mx.random.seed(args.seed)
+    print("[INFO] Loading model from disk.")
+    model, tokenizer = load_model(args.model_path)
+
+    print("[INFO] Starting generation...")
+    tic = time.time()
+    print(args.prompt, end="", flush=True)
+    prompt = mx.array(tokenizer.encode(args.prompt))
+    tokens = []
+    for token, ntoks in zip(generate(prompt, model, args.temp), range(args.max_tokens)):
+        tokens.append(token)
+        if ntoks == 0:
+            mx.eval(tokens)
+            toc = time.time()
+            prompt_tps = prompt.size / (toc - tic)
+            tic = time.time()
+
+        if (len(tokens) % args.tokens_per_eval) == 0:
+            mx.eval(tokens)
+            s = tokenizer.decode([t.item() for t in tokens])
+            print(s, end="", flush=True)
+            tokens = []
+
+    mx.eval(tokens)
+    s = tokenizer.decode([t.item() for t in tokens])
+    print(s, flush=True)
+    print("------")
+    generation_tps = ntoks / (time.time() - tic)
+    print(
+        f"Tokens per second: prompt {prompt_tps:.3f}, "
+        f"generation {generation_tps:.3f}"
+    )
