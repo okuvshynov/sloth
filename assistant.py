@@ -11,7 +11,7 @@ def mock_speculation(curr):
     return [[curr[-1]]]
 
 class SpeculatorClient:
-    def __init__(self, addr, port):
+    def __init__(self, addr, port, min_tokens):
         self.addr = addr
         self.port = port
         self.url = f'http://{addr}:{port}'
@@ -19,9 +19,10 @@ class SpeculatorClient:
         self.session = requests.Session()
         self.session.get(self.url)
         self.session_id = random.randint(0, 1000000000000)
+        self.min_tokens = min_tokens
 
-    def send_request(self, curr, min_tokens=8):
-        data = {'tokens': curr, 'session_id': self.session_id, 'min_tokens': min_tokens}
+    def send_request(self, curr, min_tokens=4):
+        data = {'tokens': curr, 'session_id': self.session_id, 'min_tokens': self.min_tokens}
         
         response = self.session.post(self.url, json=data)
         received_data = response.json()
@@ -47,13 +48,13 @@ def generate():
         default=0.0,
     )
     parser.add_argument(
-        "--speculator-addr",
+        "--addr",
         type=str,
         default="localhost",
         help="Address where to find speculator server.",
     )
     parser.add_argument(
-        "--speculator-port",
+        "--port",
         type=int,
         default=8808,
         help="Port where to find speculator server",
@@ -63,18 +64,20 @@ def generate():
         help="The message to be processed by the model",
         default="London is a capital of",
     )
+    parser.add_argument(
+        "--min-tokens",
+        help="How many tokens to wait for from speculator model",
+        type=int,
+        default=4,
+    )
 
     args = parser.parse_args()
     model, tokenizer = load_model(args.model_path)
 
-    client = SpeculatorClient(args.speculator_addr, args.speculator_port)
-    
-    # London is a capital of
-    #prompt = [1, 4222, 349, 264, 5565, 302, 28705]
+    client = SpeculatorClient(args.addr, args.port, min_tokens=args.min_tokens)
     prompt = tokenizer.encode(args.prompt)
 
     gen_speculative(model, tokenizer, prompt, client.send_request, max_tokens=64)
-    #gen_speculative(model, tokenizer, prompt, mock_speculation, max_tokens=64)
 
 
 if __name__ == '__main__':
