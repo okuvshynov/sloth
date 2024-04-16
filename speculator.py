@@ -5,7 +5,7 @@ import time
 
 import argparse
 
-from mistral7b.mistral_mlx_scratch import load_model
+from models.mistral7b_mlx import load_model
 import mlx.core as mx
 
 import fewlines.timer as ft

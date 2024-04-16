@@ -3,7 +3,8 @@ import argparse
 import random
 import logging
 
-from mistral7b.mistral_mlx_scratch import load_model, speculative_loop
+from models.mistral7b_mlx import load_model
+from gen_speculative import gen_speculative
 
 # pretends to just predict last token
 def mock_speculation(curr):
@@ -72,8 +73,8 @@ def generate():
     #prompt = [1, 4222, 349, 264, 5565, 302, 28705]
     prompt = tokenizer.encode(args.prompt)
 
-    speculative_loop(model, tokenizer, prompt, client.send_request, max_tokens=64)
-    #speculative_loop(model, tokenizer, prompt, mock_speculation, max_tokens=64)
+    gen_speculative(model, tokenizer, prompt, client.send_request, max_tokens=64)
+    #gen_speculative(model, tokenizer, prompt, mock_speculation, max_tokens=64)
 
 
 if __name__ == '__main__':
