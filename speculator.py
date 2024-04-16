@@ -147,6 +147,7 @@ class AsyncSpeculator:
                     logging.info(f'working on {req}')
                     min_tokens = req.get('min_tokens', default_min_tokens)
                     self.speculator.handle_query(req)
+                    fm.add('already_computed', len(self.speculator.tokens) - len(req['tokens']))
                     while len(self.speculator.tokens) < len(req['tokens']) + min_tokens:
                         self.speculator.gen_next() 
                     self.new_tokens = self.speculator.tokens[len(req['tokens']) - 1:]
@@ -189,7 +190,8 @@ class SpeculatorHTTPHandler(BaseHTTPRequestHandler):
         self.send_header('Content-type', 'text/plain; charset=utf-8')
         self.end_headers()
         self.wfile.writelines(f'{l}\n'.encode() for l in fd.dashboard({"charts": [('*latency', 'histogram')], "n_lines": 1}))
-        #self.wfile.writelines(f'{l}\n'.encode() for l in fm.histogram("tokens_to_process"))
+        self.wfile.writelines(f'{l}\n'.encode() for l in fm.histogram("tokens_to_process"))
+        self.wfile.writelines(f'{l}\n'.encode() for l in fm.histogram("already_computed"))
 
 
 class SpeculatorHTTPServer(HTTPServer):
