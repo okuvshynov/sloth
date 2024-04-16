@@ -40,6 +40,7 @@ def gen_speculative(model, tokenizer, prefix, next_suffixes_fn, max_tokens=256):
         # and get back partial cache for each new suffix in a batch
         with ft.Timer("model_eval_latency") as _:
             logits, local_cache = model(x, cache)
+            mx.eval(logits)
 
         best = []
         best_i = -1
