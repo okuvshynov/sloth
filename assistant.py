@@ -19,8 +19,8 @@ class SpeculatorClient:
         self.session.get(self.url)
         self.session_id = random.randint(0, 1000000000000)
 
-    def send_request(self, curr):
-        data = {'tokens': curr, 'session_id': self.session_id}
+    def send_request(self, curr, min_tokens=8):
+        data = {'tokens': curr, 'session_id': self.session_id, 'min_tokens': min_tokens}
         
         response = self.session.post(self.url, json=data)
         received_data = response.json()
@@ -57,13 +57,20 @@ def generate():
         default=8808,
         help="Port where to find speculator server",
     )
+    parser.add_argument(
+        "--prompt",
+        help="The message to be processed by the model",
+        default="London is a capital of",
+    )
+
     args = parser.parse_args()
     model, tokenizer = load_model(args.model_path)
 
     client = SpeculatorClient(args.speculator_addr, args.speculator_port)
     
     # London is a capital of
-    prompt = [1, 4222, 349, 264, 5565, 302, 28705]
+    #prompt = [1, 4222, 349, 264, 5565, 302, 28705]
+    prompt = tokenizer.encode(args.prompt)
 
     speculative_loop(model, tokenizer, prompt, client.send_request, max_tokens=64)
     #speculative_loop(model, tokenizer, prompt, mock_speculation, max_tokens=64)

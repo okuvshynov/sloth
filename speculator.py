@@ -143,8 +143,9 @@ class AsyncSpeculator:
 
             if req is not None:
                 logging.info(f'working on {req}')
+                min_tokens = req.get('min_tokens', default_min_tokens)
                 self.speculator.handle_query(req)
-                while len(self.speculator.tokens) < len(req['tokens']) + 8:
+                while len(self.speculator.tokens) < len(req['tokens']) + min_tokens:
                     self.speculator.gen_next() 
                 self.new_tokens = self.speculator.tokens[len(req['tokens']) - 1:]
                 logging.info(f'generated tokens: {self.speculator.tokens, self.new_tokens}')
