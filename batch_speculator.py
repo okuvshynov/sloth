@@ -17,7 +17,7 @@ def _longest_prefix(a, b):
     return min(len(a), len(b))
 
 class BatchSpeculator:
-    def __init__(self, model_path, batch_size=8, temp=1.0):
+    def __init__(self, model_path, batch_size=8, temp=0.5):
         # here we'll initialize model and current search tree
         logging.info(f"loading model from {model_path}")
         self.model, self.tokenizer = load_model(model_path)
@@ -76,9 +76,10 @@ class BatchSpeculator:
                 match_lens = [_longest_prefix(t, new_tokens) for t in self.tokens]
                 max_match_idx = mx.argmax(mx.array(match_lens)).item()
 
-                #pprint(new_tokens)
-                #pprint(self.tokens)
-                
+                logging.info(match_lens)
+                logging.info(len(new_tokens))
+                logging.info([len(t) for t in self.tokens])
+
                 # TODO: for simplicity we just reset all local cache here.
                 # Can probably optimize later. Local cache will be write-only in a way
                 # We get local cache from the item with max match, append it to shared cache and 

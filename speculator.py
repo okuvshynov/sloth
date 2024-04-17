@@ -4,6 +4,7 @@ import logging
 import time
 
 import argparse
+import zmq
 
 import fewlines.timer as ft
 import fewlines.dashboard as fd
@@ -28,12 +29,13 @@ class AsyncSpeculator:
         threading.Thread(target=self.gen_loop, daemon=True).start()
 
     def query(self, request):
-        with self.debounce_lock:
-            self.queue.put(request)
-            self.queue.join()
-            result = self.new_tokens
-            self.new_tokens = None
-            return result
+        with ft.Timer("query_latency") as _:
+            with self.debounce_lock:
+                self.queue.put(request)
+                self.queue.join()
+                result = self.new_tokens
+                self.new_tokens = None
+                return result
 
     def gen_loop(self):
         while True:
@@ -44,14 +46,14 @@ class AsyncSpeculator:
 
             if req is not None:
                 with ft.Timer("request_handle_latency") as _:
-                    logging.info(f'working on {req}')
+                    #logging.info(f'working on {req}')
                     min_tokens = req.get('min_tokens', default_min_tokens)
                     self.speculator.handle_query(req)
                     while self.gen_since_last < min_tokens:
                         self.speculator.gen_next()
                         self.gen_since_last += 1
                     self.new_tokens = [t[len(req['tokens']) - 1:] for t in self.speculator.tokens]
-                    logging.info(f'generated tokens: {self.speculator.tokens, self.new_tokens}')
+                    #logging.info(f'generated tokens: {self.speculator.tokens, self.new_tokens}')
                     self.gen_since_last = 0
                     self.queue.task_done()
             else:
@@ -136,8 +138,15 @@ if __name__ == '__main__':
 
     #speculator = BatchSpeculator(args.model_path, batch_size=args.batch_size)
     speculator = LinearSpeculator(args.model_path)
-    
-    httpd = SpeculatorHTTPServer((args.addr, args.port), SpeculatorHTTPHandler, speculator)
-    logging.info(f"Speculator server started on http://{args.addr}:{args.port}")
-    httpd.serve_forever()
+    async_speculator = AsyncSpeculator(speculator)
+
+    context = zmq.Context()
+
+    socket = context.socket(zmq.REP)
+    socket.bind(f"tcp://{args.addr}:{args.port}")
+    while True:
+        req = socket.recv_json()
+        print(req)
+        new_tokens = async_speculator.query(req)
+        socket.send_json({'tokens': new_tokens})
 
