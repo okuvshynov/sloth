@@ -70,6 +70,12 @@ def generate():
         type=int,
         default=4,
     )
+    parser.add_argument(
+        "--max-tokens",
+        help="How many tokens to generate",
+        type=int,
+        default=64,
+    )
 
     args = parser.parse_args()
     model, tokenizer = load_model(args.model_path)
@@ -77,7 +83,7 @@ def generate():
     client = SpeculatorClient(args.addr, args.port, min_tokens=args.min_tokens)
     prompt = tokenizer.encode(args.prompt)
 
-    gen_speculative(model, tokenizer, prompt, client.send_request, max_tokens=64)
+    gen_speculative(model, tokenizer, prompt, client.send_request, max_tokens=args.max_tokens)
 
 
 if __name__ == '__main__':

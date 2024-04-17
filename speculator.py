@@ -47,7 +47,6 @@ class AsyncSpeculator:
                     logging.info(f'working on {req}')
                     min_tokens = req.get('min_tokens', default_min_tokens)
                     self.speculator.handle_query(req)
-                    fm.add('already_computed', len(self.speculator.tokens) - len(req['tokens']))
                     while self.gen_since_last < min_tokens:
                         self.speculator.gen_next()
                         self.gen_since_last += 1

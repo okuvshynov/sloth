@@ -137,13 +137,10 @@ class BatchSpeculator:
                     #print(self.local_cache[0][0].shape)
 
                 for i in range(len(self.tokens)):
-                    # TODO here we should sample instead.
-                    #print(lengths[i])
                     y = mx.random.categorical(logits[i, lengths[i] - 1, :] * (1.0 / self.temp)).item()
                     self.tokens[i].append(y)
-                    #print(f'{i} in batch', logits[i].shape, lengths[i], y, self.tokens)
-
-                #pprint(self.tokens)
+                    
+                # need to consolidate caches? just pass current local cache?
 
 if __name__ == '__main__':
     import sys
