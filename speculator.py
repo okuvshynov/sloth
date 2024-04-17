@@ -15,6 +15,8 @@ import fewlines.metrics as fm
 import threading
 import queue
 
+from batch_speculator import BatchSpeculator
+
 default_max_tokens = 256
 default_min_tokens = 8
 
@@ -24,13 +26,12 @@ def _longest_prefix(a, b):
             return i
     return min(len(a), len(b))
 
-# this one is non-thread safe
+# this one is not-thread safe
 # it would perform just two operations:
 #  - update current (based on new input)
 #  - perform exploration step
 # all concurrency between background exploration and new inputs from the client 
 # would be handled externally
-
 class Speculator:
     def __init__(self, model_path):
         # here we'll initialize model and current search tree
@@ -95,7 +96,8 @@ class Speculator:
             return
         with ft.Timer("gen_next_latency") as _:
             with ft.Timer("inference_latency") as _:
-                # need to find the input. It is a difference between populated to cache and current tokens
+                # need to find the input. It is a difference between 
+                # processed/populated to cache and current tokens
                 tokens_to_process = self.tokens[self.cache_len:]
 
                 x = mx.array(tokens_to_process)[None]
@@ -148,9 +150,10 @@ class AsyncSpeculator:
                     min_tokens = req.get('min_tokens', default_min_tokens)
                     self.speculator.handle_query(req)
                     fm.add('already_computed', len(self.speculator.tokens) - len(req['tokens']))
-                    while len(self.speculator.tokens) < len(req['tokens']) + min_tokens:
-                        self.speculator.gen_next() 
-                    self.new_tokens = self.speculator.tokens[len(req['tokens']) - 1:]
+                    while self.gen_since_last < min_tokens:
+                        self.speculator.gen_next()
+                        self.gen_since_last += 1
+                    self.new_tokens = [t[len(req['tokens']) - 1:] for t in self.speculator.tokens]
                     logging.info(f'generated tokens: {self.speculator.tokens, self.new_tokens}')
                     self.gen_since_last = 0
                     self.queue.task_done()
@@ -226,9 +229,15 @@ if __name__ == '__main__':
         default="mlx_model",
         help="The path to the model weights and tokenizer",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=4,
+        help="Different speculative samples to work on",
+    )
     args = parser.parse_args()
 
-    speculator = Speculator(args.model_path)
+    speculator = BatchSpeculator(args.model_path, batch_size=args.batch_size)
     
     httpd = SpeculatorHTTPServer((args.addr, args.port), SpeculatorHTTPHandler, speculator)
     logging.info(f"Speculator server started on http://{args.addr}:{args.port}")

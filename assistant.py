@@ -27,7 +27,7 @@ class SpeculatorClient:
         response = self.session.post(self.url, json=data)
         received_data = response.json()
         
-        return [received_data['tokens']]
+        return received_data['tokens']
 
 # TODO: this should be also a service, which connects to the speculator
 # this service would wait for queries with some typical API, queue them and run model
