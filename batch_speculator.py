@@ -105,8 +105,6 @@ class BatchSpeculator:
 
                     self.cache_len += local_cache_match_len
 
-                print(self.cache_len)
-
                 for bi in range(self.batch_size):
                     if match_lens[bi] < len(new_tokens):
                         self.tokens[bi] = new_tokens[:]
