@@ -1,4 +1,3 @@
-import requests
 import argparse
 import random
 import logging
@@ -25,13 +24,8 @@ class SpeculatorClient:
 
     def send_request(self, curr, min_tokens=4):
         data = {'tokens': curr, 'session_id': self.session_id, 'min_tokens': self.min_tokens}
-        
         self.socket.send_json(data)
-
         response = self.socket.recv_json()
-
-        print(response)
-        
         return response['tokens']
 
 # TODO: this should be also a service, which connects to the speculator

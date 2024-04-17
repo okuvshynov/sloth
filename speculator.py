@@ -1,5 +1,3 @@
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import json
 import logging
 import time
 
@@ -7,8 +5,6 @@ import argparse
 import zmq
 
 import fewlines.timer as ft
-import fewlines.dashboard as fd
-import fewlines.metrics as fm
 
 import threading
 import queue
@@ -63,50 +59,6 @@ class AsyncSpeculator:
                 else:
                     time.sleep(0.1)
 
-class SpeculatorHTTPHandler(BaseHTTPRequestHandler):
-    def __init__(self, speculator, *args, **kwargs):
-        self.async_speculator = speculator
-        super().__init__(*args, **kwargs)
-
-    def do_POST(self):
-        content_length = int(self.headers['Content-Length'])
-        post_data = self.rfile.read(content_length)
-        req = json.loads(post_data.decode('utf-8'))
-        res = {}
-        if 'tokens' not in req or 'session_id' not in req or len(req['tokens']) == 0:
-            logging.warn('requests must contain non-empty prompt and session_id') 
-        else:
-            # TODO: we send back one of the tokens from input. Need to fix that
-            new_tokens = self.async_speculator.query(req)
-            res['tokens'] = new_tokens
-            logging.info(f'returning {res}')
-
-        # TODO: send NOT success if request is not well-formed
-        self.send_response(200)
-        self.send_header('Content-type', 'application/json')
-        self.end_headers()
-        self.wfile.write(json.dumps(res).encode())
-
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/plain; charset=utf-8')
-        self.end_headers()
-        self.wfile.writelines(f'{l}\n'.encode() for l in fd.dashboard({"charts": [('*latency', 'histogram')], "n_lines": 1}))
-        self.wfile.writelines(f'{l}\n'.encode() for l in fm.histogram("tokens_to_process"))
-        self.wfile.writelines(f'{l}\n'.encode() for l in fm.histogram("already_computed"))
-
-
-class SpeculatorHTTPServer(HTTPServer):
-    def __init__(self, server_address, RequestHandlerClass, speculator):
-        self.speculator = speculator
-        self.async_speculator = AsyncSpeculator(self.speculator)
-        super().__init__(server_address, RequestHandlerClass)
-    
-    def finish_request(self, request, client_address):
-        # Pass db_connection to the handler
-        self.RequestHandlerClass(self.async_speculator, request, client_address, self)
-
-
 if __name__ == '__main__':
     logging.basicConfig(format='%(asctime)s %(message)s', level=logging.INFO)
     parser = argparse.ArgumentParser(description="speculation service")
@@ -146,7 +98,6 @@ if __name__ == '__main__':
     socket.bind(f"tcp://{args.addr}:{args.port}")
     while True:
         req = socket.recv_json()
-        print(req)
         new_tokens = async_speculator.query(req)
         socket.send_json({'tokens': new_tokens})
 
