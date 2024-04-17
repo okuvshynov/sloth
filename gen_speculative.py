@@ -61,9 +61,9 @@ def gen_speculative(model, tokenizer, prefix, next_suffixes_fn, max_tokens=256):
                 best = output[:approved_len]
                 best_i = i
 
-        #logging.info(f'next approved sequence: {best}')
-        s = tokenizer.decode(best)
-        print(s, end="", flush=True)
+        logging.info(f'next approved sequence: {best}')
+        #s = tokenizer.decode(best)
+        #print(s, end="", flush=True)
         generated.extend(best)
 
         if len(generated) >= max_tokens:

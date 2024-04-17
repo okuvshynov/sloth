@@ -2,6 +2,7 @@ import requests
 import argparse
 import random
 import logging
+import zmq
 
 from models.mistral7b_mlx import load_model
 from gen_speculative import gen_speculative
@@ -12,22 +13,26 @@ def mock_speculation(curr):
 
 class SpeculatorClient:
     def __init__(self, addr, port, min_tokens):
+        self.context = zmq.Context()
+        self.socket = self.context.socket(zmq.REQ)
         self.addr = addr
         self.port = port
-        self.url = f'http://{addr}:{port}'
+        self.url = f'tcp://{addr}:{port}'
+        self.socket.connect(self.url)
 
-        self.session = requests.Session()
-        self.session.get(self.url)
         self.session_id = random.randint(0, 1000000000000)
         self.min_tokens = min_tokens
 
     def send_request(self, curr, min_tokens=4):
         data = {'tokens': curr, 'session_id': self.session_id, 'min_tokens': self.min_tokens}
         
-        response = self.session.post(self.url, json=data)
-        received_data = response.json()
+        self.socket.send_json(data)
+
+        response = self.socket.recv_json()
+
+        print(response)
         
-        return received_data['tokens']
+        return response['tokens']
 
 # TODO: this should be also a service, which connects to the speculator
 # this service would wait for queries with some typical API, queue them and run model
