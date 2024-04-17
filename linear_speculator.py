@@ -1,16 +1,9 @@
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import json
 import logging
-import time
-
-import argparse
 
 from models.mistral7b_mlx import load_model
 import mlx.core as mx
 
 import fewlines.timer as ft
-import fewlines.dashboard as fd
-import fewlines.metrics as fm
 
 default_max_tokens = 256
 
